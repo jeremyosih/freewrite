@@ -16,6 +16,7 @@ enum SettingsKey {
     static let colorScheme = "colorScheme"
     static let sessionMinutes = "sessionMinutes"
     static let shortcuts = "shortcuts"
+    static let storageBookmark = "storageFolderBookmark"
 }
 
 enum WritingFont {
@@ -270,6 +271,8 @@ struct SettingsView: View {
                 .tabItem { Label("Writing", systemImage: "textformat") }
             TranscriptionSettingsView()
                 .tabItem { Label("Transcription", systemImage: "waveform") }
+            StorageSettingsView()
+                .tabItem { Label("Storage", systemImage: "folder") }
             ShortcutSettingsView()
                 .tabItem { Label("Shortcuts", systemImage: "keyboard") }
         }
@@ -433,6 +436,49 @@ private struct TranscriptionSettingsView: View {
         } catch {
             hexStatus = .unavailable(error.localizedDescription)
         }
+    }
+}
+
+private struct StorageSettingsView: View {
+    private let storage = EntryStorage.shared
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("Entries Folder") {
+                    Text(storage.rootURL.path)
+                        .lineLimit(3)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                        .multilineTextAlignment(.trailing)
+                        .accessibilityIdentifier("storageFolderPath")
+                }
+
+                HStack {
+                    if storage.isTransferring {
+                        ProgressView().controlSize(.small)
+                        Text("Transferring entries…")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Show in Finder") {
+                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: storage.rootURL.path)
+                    }
+                    Button("Use Default") { Task { await storage.useDefaultFolder() } }
+                        .disabled(storage.isUsingDefault)
+                    Button("Choose Folder…") { Task { await storage.chooseFolder() } }
+                        .accessibilityIdentifier("chooseStorageFolderButton")
+                }
+                .disabled(storage.isTransferring)
+            } footer: {
+                Text(storage.isUsingDefault
+                     ? "Entries are plain Markdown files and videos. The default folder is inside Freewrite's app container; choose a folder such as Documents or iCloud Drive to keep them where you can find them."
+                     : "Entries are plain Markdown files and videos in this folder. Use Default switches back to the folder inside Freewrite's app container.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 

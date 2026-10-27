@@ -77,6 +77,7 @@ freewrite/
 │   ├── CommandPalette.swift      # ⌘K palette: full-text entry search + actions
 │   ├── WritingEditor.swift       # TextKit 2 NSTextView editor: markdown styling, highlights + hover comments
 │   ├── MarkdownStyling.swift     # Pure logic: markdown span ranges, EditorHighlight + range adjustment
+│   ├── Storage.swift             # EntryStorage (entries folder + bookmark) and StorageTransfer (move/copy)
 │   └── freewrite.entitlements    # App permissions
 ├── CLAUDE.md                     # This file
 └── AGENTS.md                     # Duplicate of this file
@@ -104,7 +105,11 @@ struct HumanEntry: Identifiable {
 
 ### File Storage
 
-**Location**: `~/Documents/Freewrite/`
+**Location**: the entries folder from `EntryStorage.shared.rootURL` (`Storage.swift`). Paths below say `~/Documents/Freewrite/` for brevity.
+- Default: `Documents/Freewrite/` inside the sandbox container, i.e. `~/Library/Containers/app.humansongs.freewrite/Data/Documents/Freewrite/` (not the user's real `~/Documents`).
+- Custom: any folder picked in Settings › Storage (e.g. real `~/Documents/Freewrite` or iCloud Drive), kept as a security-scoped bookmark (`UserDefaults["storageFolderBookmark"]`). On launch the bookmark is resolved (refreshed if stale) and `startAccessingSecurityScopedResource()` is held for the app's lifetime; access to the old folder stops when switching. If it can't be resolved or the folder is gone, the bookmark is cleared, the default folder is used and `ContentView` shows a one-time alert.
+- Never build paths from `.documentDirectory` directly: `ContentView.getDocumentsDirectory()` / `getVideosDirectory()` read `EntryStorage`, and anything resolved before an `await` must be re-resolved afterwards because the folder can change at runtime. Exception: the Hex transcript is tied to the recording: it's written next to the `.mov` where it was saved and, after a move/copy, next to its counterpart in the current folder (`saveHexTranscript`); write failures are logged. `ContentView` reloads entries on `.onChange(of: storage.rootURL)`.
+- Switching folders asks **Move / Copy / Just Switch / Cancel** (skipped when the current folder has no entries). `StorageTransfer` handles top-level canonical `[UUID]-[yyyy-MM-dd-HH-mm-ss].md`/legacy `.mov` files (`StorageTransfer.parseEntryFilename`, shared with the entry loader) plus the managed subfolders (`managedDirectoryNames`, currently `Videos/`; add new Freewrite-owned subfolders there). It never overwrites an existing destination file (skipped + reported), copies via hidden `.partial` temp names, runs a first pass off the main actor and a final pass on it (picking up saves made meanwhile), and deletes originals only if every copy succeeded; on any failure nothing is deleted and the folder doesn't change. Files that vanished from the source after the first pass are removed from the destination (`dropVanished`), and deleting entries is blocked while `isTransferring`. After a move only folders holding nothing but `.DS_Store` are removed. Unrelated files in the folder (README.md, holiday.mov, hidden files) are left alone.
 
 **Text Entries**:
 - Format: Markdown (.md)
@@ -247,7 +252,7 @@ struct VideoPlayerView: View {
 - **Settings**: ⚙︎ `SettingsLink` opening the Settings window
 
 ### Settings Window & Shortcuts (`SettingsView.swift`)
-- `Settings { SettingsView() }` scene in `freewriteApp.swift`; tabs: Writing (font, size, theme, timer length), Shortcuts.
+- `Settings { SettingsView() }` scene in `freewriteApp.swift`; tabs: Writing (font, size, theme, timer length), Transcription, Storage (entries folder), Shortcuts.
 - Every app action is an `AppCommand`. `FreewriteCommands` builds the menu items with the user's shortcuts and posts `AppCommand.notification`; `ContentView.handle(_:)` performs the action.
 - Shortcuts are stored as JSON overrides in `UserDefaults["shortcuts"]` (missing key = default, `null` = unassigned). Recording requires ⌘, ⌃ or ⌥ so plain typing never triggers a command.
 
@@ -342,6 +347,8 @@ Required entitlements in `freewrite.entitlements`:
 <key>com.apple.security.app-sandbox</key>
 <true/>
 <key>com.apple.security.files.user-selected.read-write</key>
+<true/>
+<key>com.apple.security.files.bookmarks.app-scope</key>  <!-- persist the custom entries folder -->
 <true/>
 <key>com.apple.security.device.camera</key>
 <true/>
@@ -872,11 +879,9 @@ if session.isRunning {
 
 ### File Path Issues
 
-Always use absolute paths:
+Always derive paths from the current entries folder (it can change at runtime):
 ```swift
-let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-    .appendingPathComponent("Freewrite")
-let fileURL = documentsDirectory.appendingPathComponent(filename)
+let fileURL = getDocumentsDirectory().appendingPathComponent(filename)  // EntryStorage.shared.rootURL
 ```
 
 ## Build Configuration
@@ -926,6 +931,7 @@ Stored in `UserDefaults` (keys in `SettingsKey`, read via `@AppStorage`):
 - `fontName`, `fontSize`: writing font family/PostScript name and size
 - `sessionMinutes`: timer length (default 15)
 - `shortcuts`: JSON map of `AppCommand` → shortcut overrides
+- `storageFolderBookmark`: security-scoped bookmark of the custom entries folder (missing = default container folder); edited in Settings › Storage (path, Choose Folder…, Show in Finder, Use Default)
 
 Session-only (not persisted): backspace state
 
