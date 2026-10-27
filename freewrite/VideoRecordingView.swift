@@ -362,7 +362,8 @@ class CameraManager: NSObject, ObservableObject {
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
-        request.requiresOnDeviceRecognition = false
+        // Keep journal audio on this Mac whenever the recognizer can run locally.
+        request.requiresOnDeviceRecognition = speechRecognizer.supportsOnDeviceRecognition
         speechRecognitionRequest = request
 
         speechRecognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
