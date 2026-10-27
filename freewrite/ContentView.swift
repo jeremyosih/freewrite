@@ -194,6 +194,19 @@ struct ContentView: View {
     @State private var barOverflow: [BottomBarItem] = []
     /// The "/" template menu of the editor (TemplateMenu.swift).
     @State private var templateMenu = TemplateMenuController()
+    /// Words/characters of the text on screen, counted off the main thread (WordCount.swift).
+    @State private var textCount = TextCount()
+    @AppStorage(SettingsKey.wordCountUnit) private var wordCountUnitSetting = TextCount.Unit.words.rawValue
+    @State private var isHoveringWordCount = false
+    /// Focus mode (FocusMode.swift): the bar and window chrome are hidden, only the text remains.
+    @State private var focusMode = false
+    @State private var focusGesture = FocusScrollGesture()
+    @State private var focusKeyMonitor: Any?
+    /// This view's window and the main (non-sidebar) area in it, for the scroll monitor.
+    @State private var hostWindow: NSWindow?
+    @State private var mainAreaFrame: CGRect = .zero
+    /// Whether History was open when focus mode started; it comes back with the bar.
+    @State private var sidebarBeforeFocus = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHoveringReview = false
     /// Keys of locked notes while they are open (Touch ID / Apple Watch / password).
@@ -712,21 +725,28 @@ struct ContentView: View {
 
     private var bottomBarLayout: BottomBarLayout { BottomBarLayout.decode(bottomBarLayoutJSON) }
 
+    private var bottomBarContext: BottomBarContext {
+        BottomBarContext(
+            isVideoEntry: currentVideoURL != nil,
+            hasTextEntry: selectedTextEntry != nil && entryManifest != nil,
+            isNoteClosed: isSelectedNoteClosed,
+            isNoteLocked: selectedTextEntry?.isLocked == true
+        )
+    }
+
     private func isBottomBarItemAvailable(_ item: BottomBarItem) -> Bool {
-        switch item {
-        // Writing-only controls.
-        case .backspace, .lock: return currentVideoURL == nil
-        // Nothing of a locked note is shown (or sent to a reviewer) until it's opened.
-        case .versions, .recordVoiceNote: return currentVideoURL == nil && !isSelectedNoteClosed
-        // Locked notes are never sent to a reviewer, open or not.
-        case .review: return currentVideoURL == nil && selectedTextEntry?.isLocked != true
-        default: return true
-        }
+        item.isVisible(in: bottomBarContext)
+    }
+
+    /// The status slot at the start of the left side has something to show.
+    private func barStatusVisible(isViewingVideoEntry: Bool) -> Bool {
+        isViewingVideoEntry ? (transcriptionStatus != nil || selectedVideoHasTranscript) : textEntryStatusVisible
     }
 
     /// The bottom bar with `overflow` moved into a "…" menu.
     private func bottomBarRow(overflow: [BottomBarItem], isViewingVideoEntry: Bool) -> some View {
-        HStack {
+        let groups = BottomBarModel.groups(layout: bottomBarLayout, context: bottomBarContext, overflow: overflow)
+        return HStack {
             HStack(spacing: 8) {
                 if !isViewingVideoEntry && textEntryStatusVisible {
                     textEntryStatus(textColor: textColor, textHoverColor: textHoverColor)
@@ -734,12 +754,7 @@ struct ContentView: View {
                 if isViewingVideoEntry {
                     HStack(spacing: 8) {
                         if let transcriptionStatus {
-                            Text(transcriptionStatus)
-                                .font(.system(size: 13))
-                                .foregroundColor(textColor)
-                                .lineLimit(1)
-                                .frame(maxWidth: 280, alignment: .leading)
-                                .help(transcriptionStatus)
+                            statusText(transcriptionStatus)
                         }
                         if selectedVideoHasTranscript {
                             Button(action: {
@@ -763,7 +778,7 @@ struct ContentView: View {
                         }
                     }
                 }
-                bottomBarGroup(bottomBarLayout.left.filter { !overflow.contains($0) }, leading: isViewingVideoEntry ? (transcriptionStatus != nil || selectedVideoHasTranscript) : textEntryStatusVisible)
+                bottomBarGroup(groups.left, afterStatus: barStatusVisible(isViewingVideoEntry: isViewingVideoEntry))
             }
             .padding(8)
             .cornerRadius(6)
@@ -777,8 +792,10 @@ struct ContentView: View {
             Spacer()
 
             HStack(spacing: 8) {
-                bottomBarGroup(bottomBarLayout.right.filter { !overflow.contains($0) }, overflow: overflow)
+                bottomBarGroup(groups.right, overflow: overflow)
             }
+            // Never squeezed: when the status needs room it truncates, items stay whole.
+            .fixedSize(horizontal: true, vertical: false)
             .barMenuAnchor(.barRight)
             .padding(8)
             .cornerRadius(6)
@@ -799,31 +816,37 @@ struct ContentView: View {
 
     /// Visible bar items that may move into "…", in the order they do.
     private var barOverflowCandidates: [BottomBarItem] {
-        let visible = Set((bottomBarLayout.left + bottomBarLayout.right).filter(isBottomBarItemAvailable))
-        return Self.overflowOrder.filter(visible.contains)
+        BottomBarModel.overflowCandidates(layout: bottomBarLayout, context: bottomBarContext)
     }
 
+    /// `slots` (from `BottomBarModel.groups`, so every one of them renders) with a `•` between them.
     @ViewBuilder
-    private func bottomBarGroup(_ items: [BottomBarItem], leading: Bool = false, overflow: [BottomBarItem] = []) -> some View {
-        // nil is the "…" button, placed before the gear so Settings stays last.
-        let visible: [BottomBarItem?] = {
-            var visible: [BottomBarItem?] = items.filter(isBottomBarItemAvailable)
-            if !overflow.isEmpty {
-                visible.insert(nil, at: visible.firstIndex(of: .settings) ?? visible.endIndex)
-            }
-            return visible
-        }()
-        ForEach(Array(visible.enumerated()), id: \.element) { index, item in
-            if index > 0 || leading {
+    private func bottomBarGroup(_ slots: [BottomBarSlot], afterStatus: Bool = false, overflow: [BottomBarItem] = []) -> some View {
+        ForEach(Array(slots.enumerated()), id: \.element) { index, slot in
+            if BottomBarModel.separatorBefore(index, afterStatus: afterStatus) {
                 Text("•")
                     .foregroundColor(.gray)
             }
-            if let item {
+            switch slot {
+            case .item(let item):
                 bottomBarItemView(item)
-            } else {
+            case .overflow:
                 overflowButton(items: overflow, textColor: textColor, textHoverColor: textHoverColor)
             }
         }
+    }
+
+    /// Transient status in the bar: truncates (up to 280pt) instead of pushing items into "…".
+    private func statusText(_ status: String) -> some View {
+        Text(status)
+            .font(.system(size: 13))
+            .foregroundColor(textColor)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            // The bar's fit is measured at the ideal width, so a long message doesn't move
+            // items into "…"; laid out, it takes what's free up to 280pt.
+            .frame(minWidth: 40, idealWidth: 120, maxWidth: 280, alignment: .leading)
+            .help(status)
     }
 
     @ViewBuilder
@@ -831,6 +854,8 @@ struct ContentView: View {
         switch item {
         case .versions:
             versionsButton(textColor: textColor, textHoverColor: textHoverColor)
+        case .wordCount:
+            wordCountButton
         case .recordVoiceNote:
             voiceNoteButton(textColor: textColor, textHoverColor: textHoverColor)
         case .review:
@@ -853,15 +878,7 @@ struct ContentView: View {
                 .accessibilityValue(timerButtonTitle)
                 .accessibilityIdentifier("timerButton")
                 .foregroundColor(timerColor)
-                .onHover { hovering in
-                    isHoveringTimer = hovering
-                    isHoveringBottomNav = hovering
-                    if hovering {
-                        NSCursor.pointingHand.push()
-                    } else {
-                        NSCursor.pop()
-                    }
-                }
+                .modifier(barHover($isHoveringTimer))
         case .recordVideo:
                 Button(action: {
                     guard !isPreparingVideoRecording else { return }
@@ -882,15 +899,7 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Record video")
                 .accessibilityIdentifier("recordVideoButton")
-                .onHover { hovering in
-                    isHoveringVideoButton = hovering
-                    isHoveringBottomNav = hovering
-                    if hovering {
-                        NSCursor.pointingHand.push()
-                    } else {
-                        NSCursor.pop()
-                    }
-                }
+                .modifier(barHover($isHoveringVideoButton))
                 .barMenuAnchor(.item(.recordVideo))
         case .backspace:
                 Button(action: {
@@ -901,15 +910,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("backspaceToggle")
-                .onHover { hovering in
-                    isHoveringBackspaceToggle = hovering
-                    isHoveringBottomNav = hovering
-                    if hovering {
-                        NSCursor.pointingHand.push()
-                    } else {
-                        NSCursor.pop()
-                    }
-                }
+                .modifier(barHover($isHoveringBackspaceToggle))
         case .fullscreen:
                 Button(isFullscreen ? "Minimize" : "Fullscreen") {
                     if let window = NSApplication.shared.windows.first {
@@ -919,15 +920,7 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("fullscreenButton")
                 .foregroundColor(isHoveringFullscreen ? textHoverColor : textColor)
-                .onHover { hovering in
-                    isHoveringFullscreen = hovering
-                    isHoveringBottomNav = hovering
-                    if hovering {
-                        NSCursor.pointingHand.push()
-                    } else {
-                        NSCursor.pop()
-                    }
-                }
+                .modifier(barHover($isHoveringFullscreen))
         case .newEntry:
                 Button(action: {
                     createNewEntry()
@@ -938,15 +931,7 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("newEntryButton")
                 .foregroundColor(isHoveringNewEntry ? textHoverColor : textColor)
-                .onHover { hovering in
-                    isHoveringNewEntry = hovering
-                    isHoveringBottomNav = hovering
-                    if hovering {
-                        NSCursor.pointingHand.push()
-                    } else {
-                        NSCursor.pop()
-                    }
-                }
+                .modifier(barHover($isHoveringNewEntry))
         case .history:
                 Button(action: {
                     withAnimation(.easeInOut(duration: 0.2)) {
@@ -959,15 +944,7 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(showingSidebar ? "Hide history" : "Show history")
                 .accessibilityIdentifier("historyButton")
-                .onHover { hovering in
-                    isHoveringClock = hovering
-                    isHoveringBottomNav = hovering
-                    if hovering {
-                        NSCursor.pointingHand.push()
-                    } else {
-                        NSCursor.pop()
-                    }
-                }
+                .modifier(barHover($isHoveringClock))
         case .lock:
                 lockButton(textColor: textColor, textHoverColor: textHoverColor)
         case .settings:
@@ -979,15 +956,7 @@ struct ContentView: View {
                 .accessibilityLabel("Settings")
                 .accessibilityIdentifier("settingsButton")
                 .help("Settings")
-                .onHover { hovering in
-                    isHoveringSettings = hovering
-                    isHoveringBottomNav = hovering
-                    if hovering {
-                        NSCursor.pointingHand.push()
-                    } else {
-                        NSCursor.pop()
-                    }
-                }
+                .modifier(barHover($isHoveringSettings))
         }
     }
 
@@ -1147,6 +1116,8 @@ struct ContentView: View {
             fontSizeSetting = sizes[min(max(index + step, 0), sizes.count - 1)]
         case .showWelcomeEntry:
             showWelcomeEntry()
+        case .toggleFocusMode:
+            toggleFocusMode()
         case .insertTemplate:
             insertTemplate()
         }
@@ -1185,6 +1156,7 @@ struct ContentView: View {
         }
 
         showingCommandPalette = false
+        exitFocusMode()
         closeBarMenu(.videoPermission)
         videoPermissionPopoverItems = []
         videoPermissionPopoverFallbackMessage = nil
@@ -1525,10 +1497,7 @@ struct ContentView: View {
         .accessibilityValue(isLocked ? "Locked" : "Not locked")
         .accessibilityIdentifier("lockNoteButton")
         .help(isLocked ? "This note is locked. Click to unlock it for good." : "Lock this note: encrypt it and require Touch ID to open it")
-        .onHover { hovering in
-            isHoveringLock = hovering
-            hoverCursor(hovering)
-        }
+        .modifier(barHover($isHoveringLock))
     }
 
     /// Shown instead of the editor while the selected locked note is closed.
@@ -1925,8 +1894,10 @@ struct ContentView: View {
     }
     
     
+    /// Height of the bottom bar's strip; also where focus mode's scroll gesture works.
+    private let navHeight: CGFloat = 68
+
     var body: some View {
-        let navHeight: CGFloat = 68
         let isViewingVideoEntry = currentVideoURL != nil
         
         HStack(spacing: 0) {
@@ -1979,7 +1950,8 @@ struct ContentView: View {
                     .background(Color(colorScheme == .light ? .white : .black))
                     .frame(maxWidth: 650)
                     .padding(.top, editorTopMargin)
-                    .padding(.bottom, bottomNavOpacity > 0 ? navHeight : 0)
+                    // Focus mode keeps the strip: the text doesn't move, and scrolling up there brings the bar back.
+                    .padding(.bottom, bottomNavOpacity > 0 || focusMode ? navHeight : 0)
                     .colorScheme(colorScheme)
                     .onAppear {
                         placeholderText = placeholderOptions.randomElement() ?? "Begin writing"
@@ -2035,9 +2007,14 @@ struct ContentView: View {
                     .padding()
                     .background(Color(colorScheme == .light ? .white : .black))
                     .opacity(bottomNavOpacity)
+                    // Hidden in focus mode: not clickable, and hovering doesn't bring it back.
+                    .allowsHitTesting(!focusMode)
+                    .accessibilityHidden(focusMode)
                     .onHover { hovering in
                         isHoveringBottomNav = hovering
-                        if hovering {
+                        if focusMode {
+                            return
+                        } else if hovering {
                             withAnimation(.easeOut(duration: 0.2)) {
                                 bottomNavOpacity = 1.0
                             }
@@ -2049,7 +2026,9 @@ struct ContentView: View {
                     }
                 }
             }
-            
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { mainAreaFrame = $0 }
+            .background(WindowReader { hostWindow = $0 })
+
             // Right sidebar
             if showingSidebar {
                 Divider()
@@ -2294,7 +2273,8 @@ struct ContentView: View {
         .onAppear {
             WritingWindow.openCount += 1
             templateMenu.editTemplatesHandler = { openTemplateSettings() }
-            installTimerScrollMonitor()
+            installBarScrollMonitor()
+            installFocusKeyMonitor()
             showingSidebar = false  // Hide sidebar by default
             timeRemaining = sessionMinutes * 60
             loadExistingEntries()
@@ -2307,6 +2287,11 @@ struct ContentView: View {
                 NSEvent.removeMonitor(scrollWheelMonitor)
                 self.scrollWheelMonitor = nil
             }
+            if let focusKeyMonitor {
+                NSEvent.removeMonitor(focusKeyMonitor)
+                self.focusKeyMonitor = nil
+            }
+            exitFocusMode()
             flushAnnotationAnchors()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
@@ -2316,7 +2301,24 @@ struct ContentView: View {
         .onChange(of: selectedEntryId) { closeBarMenu() }
         .onChange(of: currentVideoURL) { closeBarMenu() }
         .onChange(of: showingCommandPalette) { if showingCommandPalette { closeBarMenu() } }
-        .onChange(of: voiceRecorder.isRecording) { if voiceRecorder.isRecording { closeBarMenu() } }
+        .onChange(of: voiceRecorder.isRecording) {
+            if voiceRecorder.isRecording {
+                closeBarMenu()
+                exitFocusMode()
+            }
+        }
+        .task(id: displayedText) {
+            // Short texts are counted right away; long ones once typing pauses.
+            let snapshot = displayedText
+            if snapshot.utf16.count > 20_000 {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
+            }
+            let count = await TextCount.measure(snapshot)
+            if !Task.isCancelled {
+                textCount = count
+            }
+        }
         .onChange(of: storage.rootURL) {
             // The entries folder changed in Settings; show what's in the new one.
             // Reviews stay tied to the folder they started in, so they stop here.
@@ -2404,7 +2406,7 @@ struct ContentView: View {
                 timeRemaining -= 1
             } else if timeRemaining == 0 {
                 timerIsRunning = false
-                if !isHoveringBottomNav {
+                if !isHoveringBottomNav && !focusMode {
                     withAnimation(.easeOut(duration: 1.0)) {
                         bottomNavOpacity = 1.0
                     }
@@ -2419,29 +2421,158 @@ struct ContentView: View {
         }
     }
     
-    /// Scrolling over the timer changes it in 5-minute steps. Installed once per window, not by
-    /// the timer button, which comes and goes as the bar overflows.
-    private func installTimerScrollMonitor() {
+    /// Scrolling over the timer changes it in 5-minute steps; anywhere else over the bar's strip
+    /// it's focus mode's gesture. Installed once per window, not by the timer button, which comes
+    /// and goes as the bar overflows.
+    private func installBarScrollMonitor() {
         guard scrollWheelMonitor == nil else { return }
         scrollWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
-            if isHoveringTimer {
-                let scrollBuffer = event.deltaY * 0.25
-
-                if abs(scrollBuffer) >= 0.1 {
-                    let currentMinutes = timeRemaining / 60
-                    NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-                    let direction = -scrollBuffer > 0 ? 5 : -5
-                    let newMinutes = currentMinutes + direction
-                    let roundedMinutes = (newMinutes / 5) * 5
-                    let newTime = roundedMinutes * 60
-                    timeRemaining = min(max(newTime, 0), 2700)
-                }
+            guard isHoveringTimer && !focusMode else {
+                handleFocusScroll(event)
+                return event
+            }
+            // The timer consumes the scroll: it never toggles focus mode.
+            focusGesture.reset()
+            let scrollBuffer = event.deltaY * 0.25
+            if abs(scrollBuffer) >= 0.1 {
+                let currentMinutes = timeRemaining / 60
+                NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+                let direction = -scrollBuffer > 0 ? 5 : -5
+                let newMinutes = currentMinutes + direction
+                let roundedMinutes = (newMinutes / 5) * 5
+                let newTime = roundedMinutes * 60
+                timeRemaining = min(max(newTime, 0), 2700)
             }
             return event
         }
     }
 
+    // MARK: Focus mode
+
+    /// Scrolling down over the bar hides it (and the window chrome); scrolling up over the same
+    /// strip brings it back. Only deliberate gestures count (`FocusScrollGesture`).
+    private func handleFocusScroll(_ event: NSEvent) {
+        guard let hostWindow, event.window === hostWindow,
+              !showingCommandPalette, openBarMenu == nil,
+              isInBarStrip(event.locationInWindow, of: hostWindow) else {
+            focusGesture.reset()
+            return
+        }
+        let direction = focusGesture.add(
+            deltaY: event.scrollingDeltaY,
+            isPrecise: event.hasPreciseScrollingDeltas,
+            phase: FocusScrollGesture.Phase(event),
+            isMomentum: !event.momentumPhase.isEmpty,
+            time: event.timestamp
+        )
+        switch direction {
+        case .down: enterFocusMode()
+        case .up: exitFocusMode()
+        case nil: break
+        }
+    }
+
+    /// The bottom `navHeight` points of the main area (not the History sidebar, which scrolls).
+    private func isInBarStrip(_ locationInWindow: NSPoint, of window: NSWindow) -> Bool {
+        guard let height = window.contentView?.bounds.height else { return false }
+        // SwiftUI's global space has its origin at the top left of the window's content.
+        let point = CGPoint(x: locationInWindow.x, y: height - locationInWindow.y)
+        return mainAreaFrame.contains(point) && point.y >= mainAreaFrame.maxY - navHeight
+    }
+
+    /// Recording keeps its controls on screen, so focus mode doesn't start then.
+    private var canEnterFocusMode: Bool {
+        !voiceRecorder.isRecording && !showingVideoRecording && !isPreparingVideoRecording
+    }
+
+    private func toggleFocusMode() {
+        if focusMode {
+            exitFocusMode()
+        } else if canEnterFocusMode {
+            enterFocusMode()
+        } else {
+            showStatus("Focus mode is off while recording.")
+        }
+    }
+
+    /// Fades the bar out like the running timer does, closes History and hides the window buttons.
+    private func enterFocusMode() {
+        guard !focusMode, canEnterFocusMode else { return }
+        closeBarMenu()
+        focusMode = true
+        withAnimation(.easeIn(duration: 0.4)) {
+            bottomNavOpacity = 0
+        }
+        sidebarBeforeFocus = showingSidebar
+        if showingSidebar {
+            setSidebarShown(false)
+        }
+        setWindowButtonsHidden(true)
+    }
+
+    private func exitFocusMode() {
+        guard focusMode else { return }
+        focusMode = false
+        withAnimation(.easeOut(duration: 0.2)) {
+            bottomNavOpacity = 1
+        }
+        if sidebarBeforeFocus && !showingSidebar {
+            setSidebarShown(true)
+        }
+        sidebarBeforeFocus = false
+        setWindowButtonsHidden(false)
+    }
+
+    /// Slides History in or out; with Reduce Motion it just appears/disappears.
+    private func setSidebarShown(_ shown: Bool) {
+        var transaction = Transaction(animation: reduceMotion ? nil : .easeInOut(duration: 0.2))
+        transaction.disablesAnimations = reduceMotion
+        withTransaction(transaction) {
+            showingSidebar = shown
+        }
+    }
+
+    /// Fades the close/minimise/zoom buttons (opacity only), then hides them so they can't be clicked.
+    private func setWindowButtonsHidden(_ hidden: Bool) {
+        guard let window = hostWindow else { return }
+        let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].compactMap(window.standardWindowButton)
+        if !hidden {
+            buttons.forEach { $0.isHidden = false }
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = hidden ? 0.4 : 0.2
+            buttons.forEach { $0.animator().alphaValue = hidden ? 0 : 1 }
+        } completionHandler: {
+            MainActor.assumeIsolated {
+                // Still hidden (focus mode wasn't left meanwhile).
+                if hidden && focusMode {
+                    buttons.forEach { $0.isHidden = true }
+                }
+            }
+        }
+    }
+
+    /// Esc leaves focus mode, unless a menu, the palette, a sheet or IME composition has it.
+    private func installFocusKeyMonitor() {
+        guard focusKeyMonitor == nil else { return }
+        focusKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard focusMode, event.keyCode == 53,
+                  let hostWindow, event.window === hostWindow, hostWindow.attachedSheet == nil,
+                  openBarMenu == nil, !showingCommandPalette, !templateMenu.isOpen,
+                  event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+                  (hostWindow.firstResponder as? NSTextView)?.hasMarkedText() != true else { return event }
+            exitFocusMode()
+            return nil
+        }
+    }
+
     // MARK: Version & voice note controls
+
+    /// Hover colour + pointing hand for a bar control, undone if the control goes away under the
+    /// pointer (moved into "…", hidden), so the timer's scroll handling and the cursor don't stick.
+    private func barHover(_ isHovering: Binding<Bool>) -> BarItemHover {
+        BarItemHover(isHovering: isHovering) { isHoveringBottomNav = $0 }
+    }
 
     private func hoverCursor(_ hovering: Bool) {
         isHoveringBottomNav = hovering
@@ -2472,13 +2603,37 @@ struct ContentView: View {
             .accessibilityLabel("Version \(displayedVersion?.n ?? 1) of \(manifest.versions.count)")
             .accessibilityIdentifier("versionButton")
             .help("Versions")
-            .onHover { hovering in
-                isHoveringVersion = hovering
-                isHoveringBottomNav = hovering
-                hoverCursor(hovering)
-            }
+            .modifier(barHover($isHoveringVersion))
             .barMenuAnchor(.item(.versions))
         }
+    }
+
+    private var wordCountUnit: TextCount.Unit {
+        TextCount.Unit(rawValue: wordCountUnitSetting) ?? .words
+    }
+
+    /// The text on screen: the current version, or the sealed one being viewed.
+    private var displayedText: String {
+        viewedVersion == nil ? text : viewedVersionText
+    }
+
+    /// "142 words" (bottom bar item); click to switch between words and characters.
+    private var wordCountButton: some View {
+        let label = textCount.label(wordCountUnit)
+        return Button(action: {
+            wordCountUnitSetting = wordCountUnit.toggled.rawValue
+        }) {
+            Text(label)
+                .font(.system(size: 13).monospacedDigit())
+                .foregroundColor(isHoveringWordCount ? textHoverColor : textColor)
+                .fixedSize()
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityHint(wordCountUnit == .words ? "Shows the character count" : "Shows the word count")
+        .accessibilityIdentifier("wordCountButton")
+        .help(wordCountUnit == .words ? "Show characters" : "Show words")
+        .modifier(barHover($isHoveringWordCount))
     }
 
     /// Voice notes of the version on screen (the current one, or a sealed one being viewed).
@@ -2531,13 +2686,7 @@ struct ContentView: View {
                 Text("•")
                     .foregroundColor(.gray)
             }
-            Text(status)
-                .font(.system(size: 13))
-                .foregroundColor(textColor)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: 280, alignment: .leading)
-                .help(status)
+            statusText(status)
         }
     }
 
@@ -2624,10 +2773,7 @@ struct ContentView: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Record voice note")
         .accessibilityIdentifier("recordVoiceNoteButton")
-        .onHover { hovering in
-            isHoveringVoiceNoteButton = hovering
-            hoverCursor(hovering)
-        }
+        .modifier(barHover($isHoveringVoiceNoteButton))
         .barMenuAnchor(.item(.recordVoiceNote))
     }
 
@@ -3560,10 +3706,7 @@ extension ContentView {
         .accessibilityLabel(runningReview == nil ? "Review with" : "Review running")
         .accessibilityIdentifier("reviewButton")
         .help("Review with…")
-        .onHover { hovering in
-            isHoveringReview = hovering
-            hoverCursor(hovering)
-        }
+        .modifier(barHover($isHoveringReview))
         .barMenuAnchor(.item(.review))
     }
 
@@ -3714,6 +3857,8 @@ extension ContentView {
     }
 
     private func showBarMenu(_ kind: BarMenuKind) {
+        // A menu hangs from the bar, so the bar comes back first.
+        exitFocusMode()
         barMenuHighlight = nil
         templateMenu.close()
         withAnimation(.easeOut(duration: 0.15)) {
@@ -3819,12 +3964,6 @@ extension ContentView {
 
     // MARK: Overflow
 
-    /// Bar items that move into "…" first when the bar is too narrow. Settings and the version
-    /// menu always stay.
-    private static let overflowOrder: [BottomBarItem] = [
-        .fullscreen, .backspace, .newEntry, .timer, .recordVideo, .recordVoiceNote, .review, .lock, .history,
-    ]
-
     private func overflowAction(for item: BottomBarItem) -> BarMenuAction {
         let command: AppCommand? = switch item {
         case .timer: .toggleTimer
@@ -3836,7 +3975,7 @@ extension ContentView {
         case .history: .toggleHistory
         case .versions: .newVersion
         case .lock: .toggleNoteLock
-        case .fullscreen, .settings: nil
+        case .wordCount, .fullscreen, .settings: nil
         }
         let title = switch item {
         case .timer: timerIsRunning ? "Pause Timer" : "Start Timer"
@@ -3845,9 +3984,12 @@ extension ContentView {
         case .fullscreen: isFullscreen ? "Exit Fullscreen" : "Fullscreen"
         case .history: showingSidebar ? "Hide History" : "Show History"
         case .lock: selectedTextEntry?.isLocked == true ? "Unlock Note…" : "Lock Note"
+        case .wordCount: textCount.label(wordCountUnit)
         default: item.title
         }
-        let detail = item == .timer ? timerButtonTitle : command.flatMap { ShortcutStore.shortcut(for: $0, in: shortcutsJSON)?.displayString }
+        let detail: String? = item == .timer ? timerButtonTitle
+            : item == .wordCount ? (wordCountUnit == .words ? "Show characters" : "Show words")
+            : command.flatMap { ShortcutStore.shortcut(for: $0, in: shortcutsJSON)?.displayString }
         let isEnabled = item != .lock || (selectedTextEntry != nil && !storage.isTransferring)
         return BarMenuAction(id: "overflow-\(item.rawValue)", title: title, detail: detail, isEnabled: isEnabled) {
             switch item {
@@ -3855,6 +3997,8 @@ extension ContentView {
                 NSApplication.shared.windows.first?.toggleFullScreen(nil)
             case .settings:
                 SettingsWindow.toggle(openSettings)
+            case .wordCount:
+                wordCountUnitSetting = wordCountUnit.toggled.rawValue
             default:
                 if let command { handle(command) }
             }
@@ -3894,10 +4038,7 @@ extension ContentView {
         .accessibilityLabel("More")
         .accessibilityIdentifier("bottomBarOverflowButton")
         .help("More")
-        .onHover { hovering in
-            isHoveringOverflow = hovering
-            hoverCursor(hovering)
-        }
+        .modifier(barHover($isHoveringOverflow))
         // The open menu follows the bar as it gets wider or narrower.
         .onAppear { barOverflow = items }
         .onChange(of: items) { barOverflow = items }
@@ -3911,4 +4052,30 @@ struct PendingAnchors {
     let annotations: [Annotation]
     let entryFilename: String
     let store: AnnotationStore
+}
+
+/// See `ContentView.barHover(_:)`.
+struct BarItemHover: ViewModifier {
+    @Binding var isHovering: Bool
+    let onChange: @MainActor (Bool) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { hovering in
+                guard hovering != isHovering else { return }
+                isHovering = hovering
+                onChange(hovering)
+                if hovering {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .onDisappear {
+                guard isHovering else { return }
+                isHovering = false
+                onChange(false)
+                NSCursor.pop()
+            }
+    }
 }

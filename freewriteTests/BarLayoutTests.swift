@@ -24,7 +24,7 @@ struct BottomBarLayoutDecodeTests {
             ("settings", "right"),
         ])
         let layout = BottomBarLayout.decode(json)
-        #expect(layout.left == [.versions])
+        #expect(layout.left == [.versions, .wordCount])
         #expect(layout.right == [
             .timer, .recordVideo, .recordVoiceNote, .review, .backspace, .fullscreen, .newEntry, .history, .lock, .settings,
         ])
@@ -61,9 +61,110 @@ struct BottomBarLayoutDecodeTests {
         #expect(layout.right.last == .settings)
     }
 
+    @Test func wordCountLandsLeftAfterVersions() {
+        // A layout saved before Word Count existed.
+        let json = stored([
+            ("versions", "left"), ("timer", "right"), ("recordVideo", "right"), ("recordVoiceNote", "right"),
+            ("review", "right"), ("backspace", "right"), ("fullscreen", "right"), ("newEntry", "right"),
+            ("history", "right"), ("lock", "right"), ("settings", "right"),
+        ])
+        let layout = BottomBarLayout.decode(json)
+        #expect(layout.slots.map(\.item).prefix(3) == [.versions, .wordCount, .timer])
+        #expect(layout.left == [.versions, .wordCount])
+        #expect(layout.right.last == .settings)
+        #expect(BottomBarLayout.default.left == [.versions, .wordCount])
+    }
+
     @Test func garbageGivesTheDefault() {
         #expect(BottomBarLayout.decode("not json") == .default)
         #expect(BottomBarLayout.decode(BottomBarLayout.default.encoded()) == .default)
+    }
+}
+
+struct BottomBarModelTests {
+    private let text = BottomBarContext(hasTextEntry: true)
+
+    @Test func writingOnlyItemsAreHiddenOnVideo() {
+        let video = BottomBarContext(isVideoEntry: true)
+        for item in [BottomBarItem.versions, .wordCount, .recordVoiceNote, .review, .backspace, .lock] {
+            #expect(!item.isVisible(in: video), "\(item)")
+        }
+        for item in [BottomBarItem.timer, .recordVideo, .fullscreen, .newEntry, .history, .settings] {
+            #expect(item.isVisible(in: video), "\(item)")
+        }
+    }
+
+    @Test func closedLockedNoteShowsNothingOfTheNote() {
+        let closed = BottomBarContext(hasTextEntry: true, isNoteClosed: true, isNoteLocked: true)
+        #expect(!BottomBarItem.versions.isVisible(in: closed))
+        #expect(!BottomBarItem.wordCount.isVisible(in: closed))
+        #expect(!BottomBarItem.recordVoiceNote.isVisible(in: closed))
+        #expect(!BottomBarItem.review.isVisible(in: closed))
+        #expect(BottomBarItem.lock.isVisible(in: closed))
+        let open = BottomBarContext(hasTextEntry: true, isNoteClosed: false, isNoteLocked: true)
+        #expect(BottomBarItem.wordCount.isVisible(in: open))
+        #expect(!BottomBarItem.review.isVisible(in: open))
+    }
+
+    @Test func versionsNeedALoadedTextEntry() {
+        // Before the first entry loads there's no manifest: the version button would be empty.
+        let nothing = BottomBarContext()
+        #expect(!BottomBarItem.versions.isVisible(in: nothing))
+        #expect(BottomBarItem.versions.isVisible(in: text))
+        let groups = BottomBarModel.groups(layout: .default, context: nothing)
+        #expect(!groups.left.contains(.item(.versions)))
+        #expect(groups.left.isEmpty)
+    }
+
+    @Test func groupsOnlyHoldVisibleItems() {
+        let video = BottomBarContext(isVideoEntry: true)
+        let groups = BottomBarModel.groups(layout: .default, context: video)
+        #expect(groups.left.isEmpty)
+        #expect(groups.right == [.item(.timer), .item(.recordVideo), .item(.fullscreen), .item(.newEntry), .item(.history), .item(.settings)])
+    }
+
+    @Test func overflowSitsBeforeTheGearOnlyWhenUsed() {
+        let none = BottomBarModel.groups(layout: .default, context: text)
+        #expect(!none.right.contains(.overflow))
+        let some = BottomBarModel.groups(layout: .default, context: text, overflow: [.fullscreen, .wordCount])
+        #expect(!some.right.contains(.item(.fullscreen)))
+        #expect(!some.left.contains(.item(.wordCount)))
+        #expect(some.right.suffix(2) == [.overflow, .item(.settings)])
+        // Items that aren't visible never make an (empty) "…".
+        let video = BottomBarContext(isVideoEntry: true)
+        let hidden = BottomBarModel.groups(layout: .default, context: video, overflow: [.wordCount, .backspace])
+        #expect(!hidden.right.contains(.overflow))
+    }
+
+    @Test func overflowCandidatesAreVisibleAndPlaced() {
+        var layout = BottomBarLayout.default
+        layout.slots[layout.slots.firstIndex { $0.item == .fullscreen }!].placement = .hidden
+        let candidates = BottomBarModel.overflowCandidates(layout: layout, context: BottomBarContext(isVideoEntry: true))
+        #expect(candidates == [.newEntry, .timer, .recordVideo, .history])
+        #expect(!candidates.contains(.settings))
+    }
+
+    @Test func separatorsOnlyBetweenRenderedSlots() {
+        // Every row of the bar, for a range of states: no leading, trailing or doubled `•`.
+        let contexts = [
+            BottomBarContext(), text, BottomBarContext(isVideoEntry: true),
+            BottomBarContext(hasTextEntry: true, isNoteClosed: true, isNoteLocked: true),
+        ]
+        for context in contexts {
+            let candidates = BottomBarModel.overflowCandidates(layout: .default, context: context)
+            for count in 0...candidates.count {
+                let groups = BottomBarModel.groups(layout: .default, context: context, overflow: Array(candidates.prefix(count)))
+                for (slots, afterStatus) in [(groups.left, true), (groups.left, false), (groups.right, false)] {
+                    var row: [String] = afterStatus ? ["status"] : []
+                    for (index, slot) in slots.enumerated() {
+                        if BottomBarModel.separatorBefore(index, afterStatus: afterStatus) { row.append("•") }
+                        row.append("\(slot)")
+                    }
+                    #expect(row.first != "•" && row.last != "•")
+                    #expect(!zip(row, row.dropFirst()).contains { $0 == "•" && $1 == "•" })
+                }
+            }
+        }
     }
 }
 
