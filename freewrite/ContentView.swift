@@ -905,6 +905,8 @@ struct ContentView: View {
                     .foregroundColor(colorScheme == .light ? Color(red: 0.20, green: 0.20, blue: 0.20) : Color(red: 0.9, green: 0.9, blue: 0.9))
                     .scrollContentBackground(.hidden)
                     .scrollIndicators(.never)
+                    .accessibilityLabel("Entry text")
+                    .accessibilityIdentifier("editor")
                     .lineSpacing(lineHeight)
                     .frame(maxWidth: 650)
                     .padding(.top, 40)
@@ -964,6 +966,7 @@ struct ContentView: View {
                                             .font(.system(size: 13))
                                     }
                                     .buttonStyle(.plain)
+                                    .accessibilityIdentifier("copyTranscriptButton")
                                     .foregroundColor(isHoveringCopyTranscript ? textHoverColor : textColor)
                                     .onHover { hovering in
                                         isHoveringCopyTranscript = hovering
@@ -1000,6 +1003,9 @@ struct ContentView: View {
                                 }
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel(timerIsRunning ? "Pause timer" : "Start timer")
+                            .accessibilityValue(timerButtonTitle)
+                            .accessibilityIdentifier("timerButton")
                             .foregroundColor(timerColor)
                             .onHover { hovering in
                                 isHoveringTimer = hovering
@@ -1057,6 +1063,8 @@ struct ContentView: View {
                                 .frame(width: 14, height: 14)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Record video")
+                            .accessibilityIdentifier("recordVideoButton")
                             .onHover { hovering in
                                 isHoveringVideoButton = hovering
                                 isHoveringBottomNav = hovering
@@ -1131,6 +1139,7 @@ struct ContentView: View {
                                 didCopyPrompt = false
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("chatButton")
                             .foregroundColor(isHoveringChat ? textHoverColor : textColor)
                             .onHover { hovering in
                                 isHoveringChat = hovering
@@ -1288,6 +1297,7 @@ struct ContentView: View {
                                         .foregroundColor(isHoveringBackspaceToggle ? textHoverColor : textColor)
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityIdentifier("backspaceToggle")
                                 .onHover { hovering in
                                     isHoveringBackspaceToggle = hovering
                                     isHoveringBottomNav = hovering
@@ -1308,6 +1318,7 @@ struct ContentView: View {
                                 }
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("fullscreenButton")
                             .foregroundColor(isHoveringFullscreen ? textHoverColor : textColor)
                             .onHover { hovering in
                                 isHoveringFullscreen = hovering
@@ -1329,6 +1340,7 @@ struct ContentView: View {
                                     .font(.system(size: 13))
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("newEntryButton")
                             .foregroundColor(isHoveringNewEntry ? textHoverColor : textColor)
                             .onHover { hovering in
                                 isHoveringNewEntry = hovering
@@ -1353,6 +1365,8 @@ struct ContentView: View {
                                     .foregroundColor(isHoveringClock ? textHoverColor : textColor)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel(showingSidebar ? "Hide history" : "Show history")
+                            .accessibilityIdentifier("historyButton")
                             .onHover { hovering in
                                 isHoveringClock = hovering
                                 isHoveringBottomNav = hovering
@@ -1372,6 +1386,8 @@ struct ContentView: View {
                                     .foregroundColor(isHoveringSettings ? textHoverColor : textColor)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Settings")
+                            .accessibilityIdentifier("settingsButton")
                             .help("Settings")
                             .onHover { hovering in
                                 isHoveringSettings = hovering
@@ -1519,6 +1535,8 @@ struct ContentView: View {
                                                                     (colorScheme == .light ? .gray : .gray.opacity(0.8)))
                                                         }
                                                         .buttonStyle(.plain)
+                                                        .accessibilityLabel("Export as PDF")
+                                                        .accessibilityIdentifier("exportEntryButton")
                                                         .help("Export entry as PDF")
                                                         .onHover { hovering in
                                                             withAnimation(.easeInOut(duration: 0.2)) {
@@ -1540,6 +1558,8 @@ struct ContentView: View {
                                                                 .foregroundColor(hoveredTrashId == entry.id ? .red : .gray)
                                                         }
                                                         .buttonStyle(.plain)
+                                                        .accessibilityLabel("Delete entry")
+                                                        .accessibilityIdentifier("deleteEntryButton")
                                                         .onHover { hovering in
                                                             withAnimation(.easeInOut(duration: 0.2)) {
                                                                 hoveredTrashId = hovering ? entry.id : nil
@@ -1578,6 +1598,9 @@ struct ContentView: View {
                                     NSCursor.pop()  // Reset cursor when button appears
                                 }
                                 .help("Click to select this entry")  // Add tooltip
+                                .accessibilityLabel("\(entry.previewText.isEmpty ? "Empty entry" : entry.previewText), \(entry.date)")
+                                .accessibilityAddTraits(selectedEntryId == entry.id ? .isSelected : [])
+                                .accessibilityIdentifier("historyRow-\(entry.id.uuidString)")
                                 
                                 if entry.id != entries.last?.id {
                                     Divider()
