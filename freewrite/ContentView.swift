@@ -3818,19 +3818,19 @@ extension ContentView {
     }
 
     /// What the bar's timer does besides start/pause (double-click resets, scrolling changes the
-    /// length in 5-minute steps up to 45), so it isn't lost when the timer is in "…".
+    /// length), so it isn't lost when the timer is in "…". ±5 minutes exactly, within 0…45.
     private var timerOverflowActions: [BarMenuAction] {
-        let minutes = timeRemaining / 60
+        let maximum = 45 * 60
         return [
             BarMenuAction(id: "overflow-timer-reset", title: "Reset Timer", detail: "\(sessionMinutes):00") {
                 timeRemaining = sessionMinutes * 60
                 timerIsRunning = false
             },
-            BarMenuAction(id: "overflow-timer-longer", title: "Add 5 Minutes", isEnabled: minutes < 45) {
-                timeRemaining = min((minutes / 5 + 1) * 5, 45) * 60
+            BarMenuAction(id: "overflow-timer-longer", title: "Add 5 Minutes", isEnabled: timeRemaining < maximum) {
+                timeRemaining = min(timeRemaining + 300, maximum)
             },
-            BarMenuAction(id: "overflow-timer-shorter", title: "Remove 5 Minutes", isEnabled: minutes >= 5) {
-                timeRemaining = max((minutes - 5) / 5 * 5, 0) * 60
+            BarMenuAction(id: "overflow-timer-shorter", title: "Remove 5 Minutes", isEnabled: timeRemaining > 0) {
+                timeRemaining = max(timeRemaining - 300, 0)
             },
         ]
     }
