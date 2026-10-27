@@ -1015,6 +1015,7 @@ struct ContentView: View {
             return (entry, getDocumentsDirectory().appendingPathComponent(entry.filename))
         }
         let store = versionStore
+        let reviewActions = paletteReviewActions
         Task {
             let index = await Task.detached(priority: .userInitiated) {
                 PaletteIndex(sources.flatMap { source in
@@ -1037,7 +1038,7 @@ struct ContentView: View {
                         )
                     }
                     return [current] + sealed
-                })
+                }, reviewActions: reviewActions)
             }.value
             if showingCommandPalette && paletteLoadID == loadID {
                 paletteIndex = index
@@ -1055,9 +1056,33 @@ struct ContentView: View {
             }
         case .command(let command):
             handle(command)
+        case .review(let reviewer, let versionId):
+            // The row names a version; a menu command (New Version) may have changed it meanwhile.
+            guard displayedVersion?.id == versionId else {
+                showStatus("This entry is now on \(displayedVersion?.id ?? "another version"). Open ⌘K again to review it.")
+                return
+            }
+            if let profile = reviewerProfiles.first(where: { $0.id == reviewer.id }) {
+                startReview(profile)
+            }
+        case .clearReview:
+            clearReview()
+        case .reviewerSettings:
+            openReviewerSettings()
         case .settings:
             SettingsWindow.toggle(openSettings)
         }
+    }
+
+    /// Review actions for the version on screen; reviewers only when a review could start now
+    /// (never for locked notes, which reviewers can't read, like the bar's Review item).
+    private var paletteReviewActions: PaletteReviewActions {
+        guard let entry = selectedTextEntry, !isSelectedNoteClosed, let version = displayedVersion else { return .none }
+        return PaletteReviewActions(
+            versionId: version.id,
+            reviewers: runningReview == nil && !entry.isLocked ? reviewerProfiles.map { .init(id: $0.id, name: $0.name) } : [],
+            noteCount: annotations.filter { $0.versionId == version.id && $0.status != .dismissed }.count
+        )
     }
 
     private func handle(_ command: AppCommand) {
@@ -3505,6 +3530,15 @@ extension ContentView {
     }
 
     // MARK: Running
+
+    private func openReviewerSettings() {
+        UserDefaults.standard.set("agents", forKey: "settingsPane")
+        if let window = SettingsWindow.window {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            SettingsWindow.toggle(openSettings)
+        }
+    }
 
     private func openReviewMenu() {
         guard selectedTextEntry != nil, !voiceRecorder.isRecording, !showingVideoRecording else {

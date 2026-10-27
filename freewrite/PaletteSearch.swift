@@ -28,15 +28,38 @@ struct PaletteDocument: Identifiable, Equatable, Sendable {
     }
 }
 
+/// What the palette offers for reviewing the version on screen (captured when it opens).
+struct PaletteReviewActions: Sendable {
+    struct Reviewer: Sendable {
+        let id: String
+        let name: String
+    }
+
+    /// The version a review would read ("v2").
+    var versionId: String
+    /// Empty while a review runs or nothing can be reviewed.
+    var reviewers: [Reviewer]
+    /// Notes on that version that Clear Review would remove.
+    var noteCount: Int
+
+    static let none = PaletteReviewActions(versionId: "", reviewers: [], noteCount: 0)
+}
+
 enum PaletteItem: Identifiable, Sendable {
     case entry(PaletteDocument, snippet: String?)
     case command(AppCommand)
+    case review(PaletteReviewActions.Reviewer, versionId: String)
+    case clearReview(noteCount: Int)
+    case reviewerSettings
     case settings
 
     var id: String {
         switch self {
         case .entry(let document, _): return "entry-\(document.id.uuidString)-\(document.version ?? "current")"
         case .command(let command): return "command-\(command.rawValue)"
+        case .review(let reviewer, _): return "review-\(reviewer.id)"
+        case .clearReview: return "clearReview"
+        case .reviewerSettings: return "reviewerSettings"
         case .settings: return "settings"
         }
     }
@@ -54,8 +77,10 @@ struct PaletteIndex: Sendable {
     /// Changes whenever a new index is built, so the view knows to search again.
     let id = UUID()
     let documents: [Document]
+    let reviewActions: PaletteReviewActions
 
-    init(_ documents: [PaletteDocument]) {
+    init(_ documents: [PaletteDocument], reviewActions: PaletteReviewActions = .none) {
+        self.reviewActions = reviewActions
         self.documents = documents.map {
             // A locked note can only be found by its title and date.
             Document(
@@ -85,9 +110,9 @@ enum PaletteSearch {
     /// Empty query: recent entries, then every action. Otherwise: up to 4 matching actions, then entries.
     static func results(for query: String, in index: PaletteIndex) -> [PaletteItem] {
         if query.trimmingCharacters(in: .whitespaces).isEmpty {
-            return Array(entries(index, query: "").prefix(8)) + commands(query: "")
+            return Array(entries(index, query: "").prefix(8)) + commands(query: "", reviewActions: index.reviewActions)
         }
-        return Array(commands(query: query).prefix(4)) + entries(index, query: query)
+        return Array(commands(query: query, reviewActions: index.reviewActions).prefix(4)) + entries(index, query: query)
     }
 
     /// Every term must appear (case- and diacritic-insensitive). Title hits rank first; ties keep
@@ -120,9 +145,12 @@ enum PaletteSearch {
     }
 
     /// Titles containing the query come first, then titles matching it by word starts
-    /// ("nv" → New Version, "rec vid" → Record Video).
-    static func commands(query: String) -> [PaletteItem] {
-        let all: [PaletteItem] = AppCommand.allCases.filter { $0 != .commandPalette }.map { .command($0) } + [.settings]
+    /// ("nv" → New Version, "rec vid" → Record Video, "rwe" → Review with Editor).
+    static func commands(query: String, reviewActions: PaletteReviewActions = .none) -> [PaletteItem] {
+        let reviewItems: [PaletteItem] = reviewActions.reviewers.map { .review($0, versionId: reviewActions.versionId) }
+            + (reviewActions.noteCount > 0 ? [.clearReview(noteCount: reviewActions.noteCount)] : [])
+            + [.reviewerSettings]
+        let all: [PaletteItem] = AppCommand.allCases.filter { $0 != .commandPalette }.map { .command($0) } + reviewItems + [.settings]
         let folded = PaletteIndex.fold(query.trimmingCharacters(in: .whitespaces))
         guard !folded.isEmpty else { return all }
         let compact = Array(folded.filter { !$0.isWhitespace })
@@ -143,6 +171,9 @@ enum PaletteSearch {
         switch item {
         case .entry(let document, _): return document.title
         case .command(let command): return command.title
+        case .review(let reviewer, _): return "Review with \(reviewer.name)"
+        case .clearReview(let count): return "Clear Review (\(count == 1 ? "1 note" : "\(count) notes"))"
+        case .reviewerSettings: return "Reviewers & Models…"
         case .settings: return "Settings…"
         }
     }

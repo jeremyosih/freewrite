@@ -181,6 +181,9 @@ struct CommandPaletteView: View {
             if document.isVideo { return "video" }
             return document.version == nil ? "doc.text" : "clock.arrow.circlepath"
         case .command: return "command"
+        case .review: return "sparkles"
+        case .clearReview: return "xmark.circle"
+        case .reviewerSettings: return "person.2"
         case .settings: return "gearshape"
         }
     }
@@ -189,6 +192,8 @@ struct CommandPaletteView: View {
         switch item {
         case .entry(let document, _): return document.version.map { "\($0) · \(document.date)" } ?? document.date
         case .command(let command): return ShortcutStore.shortcut(for: command, in: shortcutsJSON)?.displayString ?? ""
+        case .review(_, let versionId): return versionId
+        case .clearReview, .reviewerSettings: return ""
         case .settings: return "⌘,"
         }
     }
