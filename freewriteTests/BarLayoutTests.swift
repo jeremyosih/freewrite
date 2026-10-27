@@ -24,7 +24,7 @@ struct BottomBarLayoutDecodeTests {
             ("settings", "right"),
         ])
         let layout = BottomBarLayout.decode(json)
-        #expect(layout.left == [.versions, .wordCount])
+        #expect(layout.left == [.versions, .wordCount, .fontSize, .font])
         #expect(layout.right == [
             .timer, .recordVideo, .recordVoiceNote, .review, .backspace, .fullscreen, .newEntry, .history, .lock, .settings,
         ])
@@ -37,6 +37,28 @@ struct BottomBarLayoutDecodeTests {
         let items = BottomBarLayout.decode(json).slots.map(\.item)
         #expect(items.firstIndex(of: .review)! < items.firstIndex(of: .settings)!)
         #expect(items.firstIndex(of: .lock)! + 1 == items.firstIndex(of: .settings)!)
+    }
+
+    @Test func fontItemsLandOnTheLeftAfterVersions() {
+        // A layout saved before Text Size and Font existed, with Timer moved to the left.
+        let json = stored([
+            ("versions", "left"), ("timer", "left"), ("recordVideo", "right"), ("review", "right"),
+            ("history", "right"), ("lock", "right"), ("settings", "right"),
+        ])
+        let layout = BottomBarLayout.decode(json)
+        #expect(layout.left == [.versions, .wordCount, .fontSize, .font, .timer])
+        #expect(layout.right.last == .settings)
+        // Versions hidden: they still come before the stored item that follows them.
+        let hidden = BottomBarLayout.decode(stored([("timer", "right"), ("versions", "hidden"), ("settings", "right")]))
+        let items = hidden.slots.map(\.item)
+        #expect(items.firstIndex(of: .fontSize)! + 1 == items.firstIndex(of: .font)!)
+        #expect(items.firstIndex(of: .font)! < items.firstIndex(of: .timer)!)
+        #expect(hidden.slots.first { $0.item == .font }?.placement == .left)
+    }
+
+    @Test func defaultPutsFontControlsLeftAfterVersions() {
+        #expect(BottomBarLayout.default.left == [.versions, .wordCount, .fontSize, .font])
+        #expect(BottomBarLayout.default.right.last == .settings)
     }
 
     @Test func storedOrderAndPlacementsAreKept() {
@@ -69,11 +91,10 @@ struct BottomBarLayoutDecodeTests {
             ("history", "right"), ("lock", "right"), ("settings", "right"),
         ])
         let layout = BottomBarLayout.decode(json)
-        #expect(layout.slots.map(\.item).prefix(3) == [.versions, .wordCount, .timer])
-        #expect(layout.left == [.versions, .wordCount])
+        #expect(layout.slots.map(\.item).prefix(5) == [.versions, .wordCount, .fontSize, .font, .timer])
+        #expect(layout.left == [.versions, .wordCount, .fontSize, .font])
         #expect(layout.right.last == .settings)
-        #expect(BottomBarLayout.default.left == [.versions, .wordCount])
-    }
+            }
 
     @Test func garbageGivesTheDefault() {
         #expect(BottomBarLayout.decode("not json") == .default)

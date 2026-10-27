@@ -107,6 +107,37 @@ struct TemplateStoreTests {
     }
 }
 
+struct TemplateWritingTests {
+    @Test func olderSavedTemplatesKeepThePageLook() {
+        // Saved before templates had a font or size.
+        let templates = TemplateStore.decode(#"[{"id":"a","name":"Morning","body":"Hi"}]"#)
+        #expect(templates.map(\.name) == ["Morning"])
+        #expect(templates[0].font == nil && templates[0].size == nil)
+        #expect(templates[0].writing == nil)
+    }
+
+    @Test func fontAndSizeRoundTripAndNilIsOmitted() throws {
+        let list = [
+            WritingTemplate(id: "a", name: "Letter", body: "Dear", font: "Times New Roman", size: 22),
+            WritingTemplate(id: "b", name: "Plain", body: ""),
+            WritingTemplate(id: "c", name: "Big", body: "", size: 26),
+        ]
+        let json = TemplateStore.encode(list)
+        #expect(TemplateStore.decode(json) == list)
+        #expect(json.components(separatedBy: #""font""#).count == 2)
+        #expect(list[0].writing == WritingSettings(font: "Times New Roman", size: 22))
+        #expect(list[2].writing == WritingSettings(size: 26))
+    }
+
+    @Test func aMalformedFontOrSizeDoesntLoseTheTemplates() {
+        let json = #"[{"id":"a","name":"One","body":"","font":42,"size":"big"},{"id":"b","name":"Two","body":"","font":" ","size":20}]"#
+        let templates = TemplateStore.decode(json)
+        #expect(templates.map(\.id) == ["a", "b"])
+        #expect(templates[0].writing == nil)
+        #expect(templates[1].writing == WritingSettings(size: 20))
+    }
+}
+
 struct SlashTriggerTests {
     @Test func opensAtLineStartOrAfterWhitespaceOnly() {
         let string = "hi and/or\n x" as NSString

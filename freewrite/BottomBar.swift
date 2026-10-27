@@ -10,6 +10,8 @@ import SwiftUI
 enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
     case versions
     case wordCount
+    case fontSize
+    case font
     case timer
     case recordVideo
     case recordVoiceNote
@@ -27,6 +29,8 @@ enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .versions: return "Versions"
         case .wordCount: return "Word Count"
+        case .fontSize: return "Text Size"
+        case .font: return "Font"
         case .timer: return "Timer"
         case .recordVideo: return "Record Video"
         case .recordVoiceNote: return "Record Voice Note"
@@ -44,6 +48,8 @@ enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .versions: return "square.stack"
         case .wordCount: return "text.word.spacing"
+        case .fontSize: return "textformat.size"
+        case .font: return "textformat"
         case .timer: return "timer"
         case .recordVideo: return "video.fill"
         case .recordVoiceNote: return "mic.fill"
@@ -62,6 +68,8 @@ enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .versions: return "v1"
         case .wordCount: return "142 words"
+        case .fontSize: return "18px"
+        case .font: return "Lato"
         case .timer: return "15:00"
         case .backspace: return "Backspace is On"
         case .fullscreen: return "Fullscreen"
@@ -96,7 +104,7 @@ struct BottomBarLayout: Codable, Equatable {
     var slots: [Slot]
 
     static let `default` = BottomBarLayout(slots: BottomBarItem.allCases.map {
-        Slot(item: $0, placement: $0 == .versions || $0 == .wordCount ? .left : .right)
+        Slot(item: $0, placement: [.versions, .wordCount, .fontSize, .font].contains($0) ? .left : .right)
     })
 
     var left: [BottomBarItem] { slots.filter { $0.placement == .left }.map(\.item) }
@@ -104,8 +112,8 @@ struct BottomBarLayout: Codable, Equatable {
 
     /// Decodes a stored layout; unknown or duplicate items are dropped. Items added in later
     /// versions get their default side and are inserted before the stored item that follows them
-    /// by default (Word Count lands on the left after Versions, Review before Backspace, History and
-    /// Settings and Lock before Settings, never after the gear).
+    /// by default (Word Count, Text Size and Font land on the left after Versions, Review before
+    /// Backspace, History and Settings and Lock before Settings, never after the gear).
     static func decode(_ json: String) -> BottomBarLayout {
         guard let data = json.data(using: .utf8),
               let stored = try? JSONDecoder().decode(StoredLayout.self, from: data) else {
@@ -172,7 +180,7 @@ extension BottomBarItem {
         // Writing-only controls.
         case .backspace, .lock: return !context.isVideoEntry
         // Nothing of a locked note is shown until it's opened.
-        case .versions, .wordCount, .recordVoiceNote:
+        case .versions, .wordCount, .fontSize, .font, .recordVoiceNote:
             return !context.isVideoEntry && context.hasTextEntry && !context.isNoteClosed
         // Locked notes are never sent to a reviewer, open or not.
         case .review: return !context.isVideoEntry && !context.isNoteLocked
@@ -193,7 +201,7 @@ enum BottomBarModel {
     /// Bar items that move into "…" first when the bar is too narrow. Settings and the version
     /// menu always stay.
     static let overflowOrder: [BottomBarItem] = [
-        .fullscreen, .wordCount, .backspace, .newEntry, .timer, .recordVideo, .recordVoiceNote, .review, .lock, .history,
+        .fullscreen, .wordCount, .backspace, .newEntry, .fontSize, .font, .timer, .recordVideo, .recordVoiceNote, .review, .lock, .history,
     ]
 
     /// Visible items that may move into "…", in the order they do.
