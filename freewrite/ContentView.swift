@@ -1240,11 +1240,8 @@ struct ContentView: View {
                                     // Calculate potential URL lengths
                                     let gptFullText = aiChatPrompt + "\n\n" + chatSourceText
                                     let claudeFullText = claudePrompt + "\n\n" + chatSourceText
-                                    let encodedGptText = gptFullText.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-                                    let encodedClaudeText = claudeFullText.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-                                    
-                                    let gptUrlLength = "https://chat.openai.com/?m=".count + encodedGptText.count
-                                    let claudeUrlLength = "https://claude.ai/new?q=".count + encodedClaudeText.count
+                                    let gptUrlLength = chatURLString(base: chatGPTBaseURL, text: gptFullText).count
+                                    let claudeUrlLength = chatURLString(base: claudeBaseURL, text: claudeFullText).count
                                     let isUrlTooLong = gptUrlLength > 6000 || claudeUrlLength > 6000
                                     
                                     if isUrlTooLong {
@@ -1867,20 +1864,26 @@ struct ContentView: View {
         }
     }
     
+    private let chatGPTBaseURL = "https://chatgpt.com/?prompt="
+    private let claudeBaseURL = "https://claude.ai/new?q="
+
+    // .urlQueryAllowed leaves &, = and + unescaped, which would cut the prompt off at the first "&".
+    private func chatURLString(base: String, text: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+?#")
+        return base + (text.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")
+    }
+
     private func openChatGPT() {
         let fullText = aiChatPrompt + "\n\n" + currentChatSourceText()
-        
-        if let encodedText = fullText.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-           let url = URL(string: "https://chat.openai.com/?prompt=" + encodedText) {
+        if let url = URL(string: chatURLString(base: chatGPTBaseURL, text: fullText)) {
             NSWorkspace.shared.open(url)
         }
     }
     
     private func openClaude() {
         let fullText = claudePrompt + "\n\n" + currentChatSourceText()
-        
-        if let encodedText = fullText.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-           let url = URL(string: "https://claude.ai/new?q=" + encodedText) {
+        if let url = URL(string: chatURLString(base: claudeBaseURL, text: fullText)) {
             NSWorkspace.shared.open(url)
         }
     }
