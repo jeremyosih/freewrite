@@ -53,6 +53,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
     case increaseFontSize
     case decreaseFontSize
     case showWelcomeEntry
+    case insertTemplate
 
     var id: String { rawValue }
 
@@ -72,6 +73,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .increaseFontSize: return "Bigger Text"
         case .decreaseFontSize: return "Smaller Text"
         case .showWelcomeEntry: return "Show Welcome Entry"
+        case .insertTemplate: return "Insert Template…"
         }
     }
 
@@ -90,7 +92,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .toggleTheme: return KeyShortcut(key: "l", modifiers: [.command, .shift])
         case .increaseFontSize: return KeyShortcut(key: "=", modifiers: [.command])
         case .decreaseFontSize: return KeyShortcut(key: "-", modifiers: [.command])
-        case .showWelcomeEntry: return nil
+        case .showWelcomeEntry, .insertTemplate: return nil
         }
     }
 
@@ -264,6 +266,7 @@ struct FreewriteCommands: Commands {
         CommandMenu("Write") {
             button(for: .toggleTimer)
             button(for: .toggleBackspace)
+            button(for: .insertTemplate)
             Divider()
             button(for: .increaseFontSize)
             button(for: .decreaseFontSize)
@@ -314,6 +317,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case permissions
     case privacy
     case agents
+    case templates
     case bottomBar
     case shortcuts
     case about
@@ -351,6 +355,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .permissions: return "Permissions"
         case .bottomBar: return "Bottom Bar"
         case .agents: return "Agents"
+        case .templates: return "Templates"
         case .privacy: return "Privacy"
         case .shortcuts: return "Shortcuts"
         case .about: return "About"
@@ -366,6 +371,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .permissions: return "hand.raised"
         case .bottomBar: return "dock.rectangle"
         case .agents: return "sparkles"
+        case .templates: return "doc.text"
         case .privacy: return "lock"
         case .shortcuts: return "command"
         case .about: return "info.circle"
@@ -451,6 +457,7 @@ struct SettingsView: View {
         case .permissions: PermissionsSettingsView()
         case .bottomBar: BottomBarSettingsView()
         case .agents: AgentsSettingsView()
+        case .templates: TemplatesSettingsView()
         case .privacy: PrivacySettingsView()
         case .shortcuts: ShortcutSettingsView()
         case .about: AboutSettingsView()
