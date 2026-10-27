@@ -72,29 +72,21 @@ struct TemplatesSettingsView: View {
 
     private var templateList: some View {
         VStack(spacing: 0) {
-            List(selection: Binding(
-                get: { selectedTemplate?.id },
-                set: { if let id = $0 { selectedId = id } }
-            )) {
+            // Rows are drawn like the reviewer list in Settings › Agents (inset, rounded
+            // selection). A selectable plain List paints square row and selection backgrounds
+            // edge to edge, over the card's rounded top corners.
+            List {
                 ForEach(templates) { template in
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(template.displayName)
-                            .font(.system(size: 12, weight: .medium))
-                            .lineLimit(1)
-                        Text(template.preview.isEmpty ? "Empty" : template.preview)
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    .padding(.vertical, 2)
-                    .tag(template.id)
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("templateRow-\(template.id)")
+                    templateRow(template, isSelected: template.id == selectedTemplate?.id)
+                        .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
                 }
                 .onMove(perform: move)
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
+            .safeAreaPadding(.vertical, 5)
             Divider()
             HStack(spacing: 2) {
                 Button {
@@ -140,7 +132,36 @@ struct TemplatesSettingsView: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
         }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .settingsCardBackground()
+    }
+
+    private func templateRow(_ template: WritingTemplate, isSelected: Bool) -> some View {
+        Button {
+            selectedId = template.id
+        } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(template.displayName)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                Text(template.preview.isEmpty ? "Empty" : template.preview)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isSelected ? Color.primary.opacity(0.09) : .clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityIdentifier("templateRow-\(template.id)")
     }
 
     // MARK: Editing
@@ -212,8 +233,17 @@ struct TemplatesSettingsView: View {
 /// The right column: one template's name, font, size and text, saved as you type.
 private struct TemplateEditor: View {
     @Binding var template: WritingTemplate
+    @AppStorage(SettingsKey.fontName) private var defaultFontName = WritingFont.defaultName
+    @AppStorage(SettingsKey.fontSize) private var defaultFontSize = WritingFont.defaultSize
+    @AppStorage(FavoriteFonts.key) private var favoriteFontsJSON = ""
 
     private static let families = NSFontManager.shared.availableFontFamilies.sorted()
+
+    /// The text box shows the template's font and size, else the defaults for new pages.
+    private var bodyFont: NSFont {
+        WritingEditor.font(named: template.font ?? defaultFontName,
+                           size: CGFloat(template.size ?? defaultFontSize))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -229,17 +259,17 @@ private struct TemplateEditor: View {
                     Picker("Font", selection: $template.font) {
                         Text("Keep page font").tag(String?.none)
                         Divider()
-                        ForEach(WritingFont.presets, id: \.name) { preset in
-                            Text(preset.label).tag(Optional(preset.name))
+                        let favorites = FavoriteFonts.decode(favoriteFontsJSON)
+                        ForEach(favorites, id: \.self) { name in
+                            Text(FavoriteFonts.label(for: name)).tag(Optional(name))
                         }
-                        Divider()
-                        ForEach(Self.families, id: \.self) { family in
+                        if !favorites.isEmpty { Divider() }
+                        ForEach(Self.families.filter { !favorites.contains($0) }, id: \.self) { family in
                             Text(family).tag(Optional(family))
                         }
                         // Keep a font that's no longer installed selectable.
-                        if let font = template.font, !Self.families.contains(font),
-                           !WritingFont.presets.contains(where: { $0.name == font }) {
-                            Text(font).tag(Optional(font))
+                        if let font = template.font, !Self.families.contains(font), !favorites.contains(font) {
+                            Text(FavoriteFonts.label(for: font)).tag(Optional(font))
                         }
                     }
                     .labelsHidden()
@@ -263,9 +293,9 @@ private struct TemplateEditor: View {
                 }
             }
 
-            SettingsSectionHeader("Text", detail: "Markdown, inserted as is")
+            SettingsSectionHeader("Text", detail: "Markdown, inserted as is; shown in the template's font")
             TextEditor(text: $template.body)
-                .font(.system(size: 12, design: .monospaced))
+                .font(Font(bodyFont))
                 .scrollContentBackground(.hidden)
                 .frame(maxHeight: .infinity)
                 .padding(6)

@@ -154,3 +154,41 @@ struct PageWritingStoreTests {
         #expect(!fileManager.fileExists(atPath: store.entriesURL.path))
     }
 }
+
+struct FavoriteFontsTests {
+    @Test func missingOrUnreadableMeansDefaults() {
+        #expect(FavoriteFonts.decode("") == FavoriteFonts.defaults)
+        #expect(FavoriteFonts.decode("not json") == FavoriteFonts.defaults)
+        #expect(FavoriteFonts.decode(#"{"fonts":["Arial"]}"#) == FavoriteFonts.defaults)
+        #expect(FavoriteFonts.decode(#"[1,2]"#) == FavoriteFonts.defaults)
+        #expect(FavoriteFonts.defaults == ["Lato-Regular", "Arial", ".AppleSystemUIFont", "Times New Roman"])
+    }
+
+    @Test func emptyListIsKept() {
+        #expect(FavoriteFonts.decode("[]") == [])
+        #expect(FavoriteFonts.decode(FavoriteFonts.encode([])) == [])
+    }
+
+    @Test func roundTripsInOrder() {
+        let names = ["Georgia", "Lato-Regular", "Menlo"]
+        #expect(FavoriteFonts.decode(FavoriteFonts.encode(names)) == names)
+    }
+
+    @Test func dedupesAndDropsBlanks() {
+        #expect(FavoriteFonts.decode(#"["Arial"," ","Georgia","Arial"," Georgia "]"#) == ["Arial", "Georgia"])
+        #expect(FavoriteFonts.cleaned(["", "Menlo", "Menlo"]) == ["Menlo"])
+        #expect(FavoriteFonts.adding("Arial", to: ["Arial", "Menlo"]) == ["Arial", "Menlo"])
+        #expect(FavoriteFonts.adding("Georgia", to: ["Arial"]) == ["Arial", "Georgia"])
+    }
+
+    @Test func labels() {
+        #expect(FavoriteFonts.label(for: "Lato-Regular") == "Lato")
+        #expect(FavoriteFonts.label(for: ".AppleSystemUIFont") == "System")
+        #expect(FavoriteFonts.label(for: "Times New Roman") == "Serif")
+        #expect(FavoriteFonts.label(for: "Arial") == "Arial")
+        #expect(FavoriteFonts.label(for: "Georgia-Regular") == "Georgia")
+        #expect(FavoriteFonts.label(for: "-Regular") == "-Regular")
+        #expect(FavoriteFonts.label(for: "Avenir Next") == "Avenir Next")
+        #expect(WritingFont.displayName(for: "Lato-Regular") == "Lato")
+    }
+}
