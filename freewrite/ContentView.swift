@@ -1519,6 +1519,7 @@ struct ContentView: View {
             // Right sidebar
             if showingSidebar {
                 Divider()
+                    .ignoresSafeArea(edges: .top)
                 
                 VStack(spacing: 0) {
                     // Header
@@ -1696,7 +1697,9 @@ struct ContentView: View {
                     .scrollIndicators(.never)
                 }
                 .frame(width: 200)
-                .background(Color(colorScheme == .light ? .white : NSColor.black))
+                // Extend the sidebar background under the hidden title bar so the column
+                // isn't cut off ~30pt below the top of the window.
+                .background(Color(colorScheme == .light ? .white : NSColor.black).ignoresSafeArea(edges: .top))
             }
         }
         .overlay {
