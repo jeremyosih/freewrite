@@ -217,7 +217,7 @@ private struct TemplateEditor: View {
         VStack(alignment: .leading, spacing: 8) {
             SettingsCard {
                 SettingsCardRow("Name", subtitle: "What you type after / to find it") {
-                    TextField("Name", text: $template.name, prompt: Text("Morning pages"))
+                    TextField("Name", text: $template.name, prompt: Text("Plan my day"))
                         .labelsHidden()
                         .multilineTextAlignment(.trailing)
                         .frame(maxWidth: 200)

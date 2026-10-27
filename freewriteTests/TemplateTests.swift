@@ -85,7 +85,7 @@ struct TemplateStoreTests {
     @Test func missingOrBrokenValueMeansDefaults() {
         #expect(TemplateStore.decode("") == WritingTemplate.defaults)
         #expect(TemplateStore.decode("not json") == WritingTemplate.defaults)
-        #expect(WritingTemplate.defaults.map(\.name) == ["Morning pages", "Gratitude", "Daily review", "Meeting notes"])
+        #expect(WritingTemplate.defaults.map(\.name) == ["Plan my day", "Something happened", "New idea", "In love", "Pivot"])
     }
 
     @Test func roundTripsOrderAndAnEmptyList() {

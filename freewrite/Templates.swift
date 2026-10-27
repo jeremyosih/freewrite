@@ -36,58 +36,32 @@ struct WritingTemplate: Codable, Equatable, Identifiable, Sendable {
         return String(stripped.prefix(60))
     }
 
+    /// Farza's starting prompts from the welcome note (`default.md`): "The starting prompt is everything."
     static let defaults: [WritingTemplate] = [
         WritingTemplate(
-            id: "morning-pages",
-            name: "Morning pages",
-            body: """
-            # Morning pages · {{date}}
-
-            Three pages, longhand pace, no stopping. Whatever is on your mind:
-
-            {{cursor}}
-            """
+            id: "plan-my-day",
+            name: "Plan my day",
+            body: "What am I working on today? Why is that the most important thing for me to work on?\n\n{{cursor}}"
         ),
         WritingTemplate(
-            id: "gratitude",
-            name: "Gratitude",
-            body: """
-            ## Grateful for · {{date}}
-
-            1. {{cursor}}
-            2.
-            3.
-            """
+            id: "something-happened",
+            name: "Something happened",
+            body: "Today, {{cursor}} happened. And it’s got me feeling really down. I think — "
         ),
         WritingTemplate(
-            id: "daily-review",
-            name: "Daily review",
-            body: """
-            ## Daily review · {{date}}
-
-            **What went well?**
-            {{cursor}}
-
-            **What was hard?**
-
-            **What will I do differently tomorrow?**
-            """
+            id: "new-idea",
+            name: "New idea",
+            body: "I had a new idea around {{cursor}} today and want to think through it. Basically — "
         ),
         WritingTemplate(
-            id: "meeting-notes",
-            name: "Meeting notes",
-            body: """
-            ## Meeting · {{date}}, {{time}}
-
-            **With:**
-            **Topic:** {{cursor}}
-
-            ### Notes
-            -
-
-            ### Next steps
-            - [ ]
-            """
+            id: "in-love",
+            name: "In love",
+            body: "I’m in love. And I just wanna talk about it. So — {{cursor}}"
+        ),
+        WritingTemplate(
+            id: "pivot",
+            name: "Pivot",
+            body: "I think I wanna pivot some stuff. Here’s how I’m thinking about it — {{cursor}}"
         ),
     ]
 }

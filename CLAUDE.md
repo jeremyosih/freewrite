@@ -313,7 +313,7 @@ struct VideoPlayerView: View {
 - Insertion replaces "/query" with `TemplateExpander.expand(body)` via `insertText(_:replacementRange:)` between `breakUndoCoalescing()` calls, so it's one undo step (⌘Z brings back "/query") and autosave/annotation anchors see one ordinary edit. `{{date}}` (full date) and `{{time}}` (short time) use the current locale; the caret lands on the first `{{cursor}}` (others are dropped), else at the end.
 - Backspace off: backspace is still allowed while the menu is open and the query is non-empty (`TemplateMenuController.allowsBackspace`), so a typo in the query can be fixed; it never deletes the "/" or text before it. Forward delete stays blocked.
 - Matching (`TemplateSearch`): case/diacritic folding from `PaletteIndex.fold`; names starting with the query, then a word starting with it, then containing it, then word-start abbreviations (`PaletteSearch.matchesWordStarts`, "mn" → Meeting notes); ties keep the user's order.
-- Storage: `WritingTemplate {id, name, body}` array as JSON in `UserDefaults["templates"]` (`SettingsKey.templates`); missing/unreadable = defaults (Morning pages, Gratitude, Daily review, Meeting notes); an empty array is kept. Tests: `freewriteTests/TemplateTests.swift` (run headless in a scratch package with `Templates.swift`, `PaletteSearch.swift` and a `SettingsKey`/`AppCommand` shim).
+- Storage: `WritingTemplate {id, name, body}` array as JSON in `UserDefaults["templates"]` (`SettingsKey.templates`); missing/unreadable = defaults: Farza's starting prompts from the welcome note `default.md` (Plan my day, Something happened, New idea, In love, Pivot); an empty array is kept. Tests: `freewriteTests/TemplateTests.swift` (run headless in a scratch package with `Templates.swift`, `PaletteSearch.swift` and a `SettingsKey`/`AppCommand` shim).
 
 ### Accessibility
 Bottom-bar controls, the editor and history rows carry `accessibilityLabel`s (where the visible text isn't enough) and stable `accessibilityIdentifier`s (`timerButton`, `recordVideoButton`, `historyButton`, `settingsButton`, `newEntryButton`, `editor`, `historyRow-<uuid>`, `commandPaletteSearch`, …) for VoiceOver and UI automation.
@@ -1026,7 +1026,7 @@ Stored in `UserDefaults` (keys in `SettingsKey`, read via `@AppStorage`):
 - `appleTranscriptionLanguage`: locale id for Apple transcription (empty = automatic)
 - `microphoneID`: `AVCaptureDevice.uniqueID` / Core Audio UID of the recording input (empty = system default)
 - `reviewers`: JSON array of `ReviewerProfile` (missing = Mirror/Editor/Coach defaults)
-- `templates`: JSON array of `WritingTemplate` (missing = Morning pages/Gratitude/Daily review/Meeting notes defaults)
+- `templates`: JSON array of `WritingTemplate` (missing = the welcome note's starting prompts)
 - `settingsPane`: last Settings pane
 - `noteLockTimeoutMinutes`: locked notes close after this many minutes without using Freewrite (1/5/15, default 5; 0 = only when the Mac sleeps)
 - `storageFolderBookmark`: security-scoped bookmark of the custom entries folder (missing = default container folder); edited in Settings › Storage (path, Choose Folder…, Show in Finder, Use Default)
