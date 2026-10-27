@@ -272,20 +272,62 @@ struct FreewriteCommands: Commands {
 
 // MARK: - Settings window
 
-struct SettingsView: View {
-    var body: some View {
-        TabView {
-            WritingSettingsView()
-                .tabItem { Label("Writing", systemImage: "textformat") }
-            TranscriptionSettingsView()
-                .tabItem { Label("Transcription", systemImage: "waveform") }
-            StorageSettingsView()
-                .tabItem { Label("Storage", systemImage: "folder") }
-            ShortcutSettingsView()
-                .tabItem { Label("Shortcuts", systemImage: "keyboard") }
+private enum SettingsPane: String, CaseIterable, Identifiable {
+    case writing
+    case transcription
+    case storage
+    case shortcuts
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .writing: return "Writing"
+        case .transcription: return "Transcription"
+        case .storage: return "Storage"
+        case .shortcuts: return "Shortcuts"
         }
-        .frame(width: 520)
-        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    var systemImage: String {
+        switch self {
+        case .writing: return "textformat"
+        case .transcription: return "waveform"
+        case .storage: return "folder"
+        case .shortcuts: return "keyboard"
+        }
+    }
+}
+
+struct SettingsView: View {
+    @AppStorage("settingsPane") private var selectedPane: SettingsPane = .writing
+
+    var body: some View {
+        NavigationSplitView {
+            List(SettingsPane.allCases, selection: Binding(
+                get: { Optional(selectedPane) },
+                set: { if let pane = $0 { selectedPane = pane } }
+            )) { pane in
+                Label(pane.title, systemImage: pane.systemImage)
+                    .tag(pane)
+            }
+            .navigationSplitViewColumnWidth(180)
+            .toolbar(removing: .sidebarToggle)
+        } detail: {
+            pane(selectedPane)
+                .navigationTitle(selectedPane.title)
+        }
+        .frame(width: 720, height: 520)
+    }
+
+    @ViewBuilder
+    private func pane(_ pane: SettingsPane) -> some View {
+        switch pane {
+        case .writing: WritingSettingsView()
+        case .transcription: TranscriptionSettingsView()
+        case .storage: StorageSettingsView()
+        case .shortcuts: ShortcutSettingsView()
+        }
     }
 }
 
