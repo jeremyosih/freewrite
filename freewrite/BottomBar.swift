@@ -12,6 +12,7 @@ enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
     case timer
     case recordVideo
     case recordVoiceNote
+    case review
     case backspace
     case fullscreen
     case newEntry
@@ -26,6 +27,7 @@ enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
         case .timer: return "Timer"
         case .recordVideo: return "Record Video"
         case .recordVoiceNote: return "Record Voice Note"
+        case .review: return "Review"
         case .backspace: return "Backspace Toggle"
         case .fullscreen: return "Fullscreen"
         case .newEntry: return "New Entry"
@@ -40,6 +42,7 @@ enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
         case .timer: return "timer"
         case .recordVideo: return "video.fill"
         case .recordVoiceNote: return "mic.fill"
+        case .review: return "sparkles"
         case .backspace: return "delete.left"
         case .fullscreen: return "arrow.up.left.and.arrow.down.right"
         case .newEntry: return "square.and.pencil"
@@ -56,7 +59,7 @@ enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
         case .backspace: return "Backspace is On"
         case .fullscreen: return "Fullscreen"
         case .newEntry: return "New Entry"
-        case .recordVideo, .recordVoiceNote, .history, .settings: return nil
+        case .recordVideo, .recordVoiceNote, .review, .history, .settings: return nil
         }
     }
 }
