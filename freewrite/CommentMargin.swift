@@ -39,6 +39,19 @@ final class CommentMarginModel {
     var maxCardLift: CGFloat = 0
     /// The lift actually applied to every card (and its connector).
     var cardLift: CGFloat { min(max(cardLiftRequest, 0), maxCardLift) }
+    /// The window showing this column, so its scroll monitor ignores every other window.
+    @ObservationIgnored weak var window: NSWindow?
+
+    /// Scrolls the column just enough that the card at `top` (card-area coordinates, before the
+    /// lift) with `height` is fully visible.
+    func revealCard(top: CGFloat, height: CGFloat) {
+        let visibleTop = top - cardLift
+        if visibleTop < Self.cardInset {
+            cardLiftRequest = max(0, top - Self.cardInset)
+        } else if visibleTop + height > cardAreaFrame.height - Self.cardInset {
+            cardLiftRequest = min(maxCardLift, top + height - cardAreaFrame.height + Self.cardInset)
+        }
+    }
 
     /// How far the lowest card reaches below the card area for these card tops.
     func overflow(of tops: [String: CGFloat]) -> CGFloat {
@@ -179,6 +192,12 @@ struct CommentColumn: View {
         .clipped()
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { model.cardAreaFrame = $0 }
         .onChange(of: overflow, initial: true) { _, overflow in model.maxCardLift = overflow }
+        // A selected card is pinned at its passage; keep it on screen when the column was scrolled.
+        .onChange(of: model.activeId) { _, id in
+            guard let id, let top = model.tops(for: cards)[id] else { return }
+            model.revealCard(top: top, height: model.cardHeights[id] ?? CommentMarginModel.estimatedCardHeight)
+        }
+        .background(WindowReader { model.window = $0 })
         // Cards that don't fit below the column's bottom can't be reached by scrolling the text
         // (a short entry has nothing to scroll), so the column scrolls them up itself.
         .onAppear { installCardScrollMonitor() }
@@ -190,7 +209,8 @@ struct CommentColumn: View {
     private func installCardScrollMonitor() {
         guard cardScrollMonitor == nil else { return }
         cardScrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [model] event in
-            guard model.maxCardLift > 0, let window = event.window, let content = window.contentView else { return event }
+            guard model.maxCardLift > 0, let window = event.window, window === model.window,
+                  let content = window.contentView else { return event }
             // SwiftUI's global frames are window coordinates with y from the top.
             let point = CGPoint(x: event.locationInWindow.x, y: content.bounds.height - event.locationInWindow.y)
             guard model.cardAreaFrame.contains(point) else { return event }
