@@ -23,6 +23,8 @@ struct WritingEditor: NSViewRepresentable {
     var canTakeFocus: Bool = true
     /// False shows the text read-only (selectable, not editable), e.g. a sealed version.
     var isEditable: Bool = true
+    /// Breathing room before the first line (and after the last); it scrolls with the text.
+    var verticalInset: CGFloat = 0
 
     /// `.custom`-style lookup: PostScript name, then family name, then the system font.
     static func font(named name: String, size: CGFloat) -> NSFont {
@@ -42,7 +44,7 @@ struct WritingEditor: NSViewRepresentable {
         textView.importsGraphics = false
         textView.allowsUndo = true
         textView.drawsBackground = false
-        textView.textContainerInset = .zero
+        textView.textContainerInset = NSSize(width: 0, height: verticalInset)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
@@ -75,6 +77,10 @@ struct WritingEditor: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         let coordinator = context.coordinator
+        if let textView = scrollView.documentView as? NSTextView,
+           textView.textContainerInset.height != verticalInset {
+            textView.textContainerInset = NSSize(width: 0, height: verticalInset)
+        }
         coordinator.binding = $text
         coordinator.setEditable(isEditable)
 

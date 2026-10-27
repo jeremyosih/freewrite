@@ -111,9 +111,6 @@ struct ContentView: View {
     @State private var scrollOffset: CGFloat = 0
     @State private var selectedEntryId: UUID? = nil
     @State private var hoveredEntryId: UUID? = nil
-    @State private var isHoveringChat = false  // Add this state variable
-    @State private var showingChatMenu = false
-    @State private var chatMenuAnchor: CGPoint = .zero
     @State private var showingSidebar = false  // Add this state variable
     @State private var hoveredTrashId: UUID? = nil
     @State private var hoveredExportId: UUID? = nil
@@ -126,7 +123,6 @@ struct ContentView: View {
     @State private var isHoveringHistoryArrow = false
     @State private var isHoveringCopyTranscript = false
     @State private var isHoveringSettings = false
-    @State private var didCopyPrompt: Bool = false // Add state for copy prompt feedback
     @State private var didCopyTranscript: Bool = false
     @State private var selectedVideoHasTranscript = false
     /// Hex progress or failure per video entry; only the selected entry's is shown.
@@ -137,6 +133,7 @@ struct ContentView: View {
     /// earlier opening can't replace newer results.
     @State private var paletteLoadID: UUID? = nil
     @AppStorage(SettingsKey.shortcuts) private var shortcutsJSON = "{}"
+    @AppStorage(SettingsKey.bottomBarLayout) private var bottomBarLayoutJSON = ""
     @Environment(\.openSettings) private var openSettings
     @State private var backspaceDisabled = false // Add state for backspace toggle
     @State private var isHoveringBackspaceToggle = false // Add state for backspace toggle hover
@@ -194,32 +191,6 @@ struct ContentView: View {
         return cache
     }()
     
-    // Add shared prompt constant
-    private let aiChatPrompt = """
-    below is my journal entry. wyt? talk through it with me like a friend. don't therpaize me and give me a whole breakdown, don't repeat my thoughts with headings. really take all of this, and tell me back stuff truly as if you're an old homie.
-    
-    Keep it casual, dont say yo, help me make new connections i don't see, comfort, validate, challenge, all of it. dont be afraid to say a lot. format with markdown headings if needed.
-
-    do not just go through every single thing i say, and say it back to me. you need to proccess everythikng is say, make connections i don't see it, and deliver it all back to me as a story that makes me feel what you think i wanna feel. thats what the best therapists do.
-
-    ideally, you're style/tone should sound like the user themselves. it's as if the user is hearing their own tone but it should still feel different, because you have different things to say and don't just repeat back they say.
-
-    else, start by saying, "hey, thanks for showing me this. my thoughts:"
-        
-    my entry:
-    """
-    
-    private let claudePrompt = """
-    Take a look at my journal entry below. I'd like you to analyze it and respond with deep insight that feels personal, not clinical.
-    Imagine you're not just a friend, but a mentor who truly gets both my tech background and my psychological patterns. I want you to uncover the deeper meaning and emotional undercurrents behind my scattered thoughts.
-    Keep it casual, dont say yo, help me make new connections i don't see, comfort, validate, challenge, all of it. dont be afraid to say a lot. format with markdown headings if needed.
-    Use vivid metaphors and powerful imagery to help me see what I'm really building. Organize your thoughts with meaningful headings that create a narrative journey through my ideas.
-    Don't just validate my thoughts - reframe them in a way that shows me what I'm really seeking beneath the surface. Go beyond the product concepts to the emotional core of what I'm trying to solve.
-    Be willing to be profound and philosophical without sounding like you're giving therapy. I want someone who can see the patterns I can't see myself and articulate them in a way that feels like an epiphany.
-    Start with 'hey, thanks for showing me this. my thoughts:' and then use markdown headings to structure your response.
-
-    Here's my journal entry:
-    """
     
     private func getDocumentsDirectory() -> URL {
         storage.rootURL
@@ -650,6 +621,278 @@ struct ContentView: View {
         }
     }
     
+    // MARK: - Bottom bar
+
+    /// Thin gap between the window's top edge and the editor's scroll area.
+    private let editorTopMargin: CGFloat = 4
+    /// Space before a note's first line; scrolls away with the text.
+    private let noteTopInset: CGFloat = 16
+
+    private var textColor: Color { colorScheme == .light ? Color.gray : Color.gray.opacity(0.8) }
+    private var textHoverColor: Color { colorScheme == .light ? Color.black : Color.white }
+
+    private var bottomBarLayout: BottomBarLayout { BottomBarLayout.decode(bottomBarLayoutJSON) }
+
+    private func isBottomBarItemAvailable(_ item: BottomBarItem) -> Bool {
+        switch item {
+        // Writing-only controls.
+        case .backspace, .versions, .recordVoiceNote: return currentVideoURL == nil
+        default: return true
+        }
+    }
+
+    @ViewBuilder
+    private func bottomBarGroup(_ items: [BottomBarItem], leading: Bool = false) -> some View {
+        let visible = items.filter(isBottomBarItemAvailable)
+        ForEach(Array(visible.enumerated()), id: \.element) { index, item in
+            if index > 0 || leading {
+                Text("•")
+                    .foregroundColor(.gray)
+            }
+            bottomBarItemView(item)
+        }
+    }
+
+    @ViewBuilder
+    private func bottomBarItemView(_ item: BottomBarItem) -> some View {
+        switch item {
+        case .versions:
+            versionsButton(textColor: textColor, textHoverColor: textHoverColor)
+        case .recordVoiceNote:
+            voiceNoteButton(textColor: textColor, textHoverColor: textHoverColor)
+        case .timer:
+                Button(timerButtonTitle) {
+                    let now = Date()
+                    if let lastClick = lastClickTime,
+                       now.timeIntervalSince(lastClick) < 0.3 {
+                        timeRemaining = sessionMinutes * 60
+                        timerIsRunning = false
+                        lastClickTime = nil
+                    } else {
+                        timerIsRunning.toggle()
+                        lastClickTime = now
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(timerIsRunning ? "Pause timer" : "Start timer")
+                .accessibilityValue(timerButtonTitle)
+                .accessibilityIdentifier("timerButton")
+                .foregroundColor(timerColor)
+                .onHover { hovering in
+                    isHoveringTimer = hovering
+                    isHoveringBottomNav = hovering
+                    if hovering {
+                        NSCursor.pointingHand.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+                }
+                .onAppear {
+                    guard scrollWheelMonitor == nil else { return }
+                    scrollWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+                        if isHoveringTimer {
+                            let scrollBuffer = event.deltaY * 0.25
+                            
+                            if abs(scrollBuffer) >= 0.1 {
+                                let currentMinutes = timeRemaining / 60
+                                NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+                                let direction = -scrollBuffer > 0 ? 5 : -5
+                                let newMinutes = currentMinutes + direction
+                                let roundedMinutes = (newMinutes / 5) * 5
+                                let newTime = roundedMinutes * 60
+                                timeRemaining = min(max(newTime, 0), 2700)
+                            }
+                        }
+                        return event
+                    }
+                }
+                .onDisappear {
+                    if let scrollWheelMonitor {
+                        NSEvent.removeMonitor(scrollWheelMonitor)
+                        self.scrollWheelMonitor = nil
+                    }
+                }
+        case .recordVideo:
+                Button(action: {
+                    guard !isPreparingVideoRecording else { return }
+                    startVideoRecordingPreflight()
+                }) {
+                    Group {
+                        if isPreparingVideoRecording {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(isHoveringVideoButton ? textHoverColor : textColor)
+                        } else {
+                            Image(systemName: "video.fill")
+                                .foregroundColor(isHoveringVideoButton ? textHoverColor : textColor)
+                        }
+                    }
+                    .frame(width: 14, height: 14)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Record video")
+                .accessibilityIdentifier("recordVideoButton")
+                .onHover { hovering in
+                    isHoveringVideoButton = hovering
+                    isHoveringBottomNav = hovering
+                    if hovering {
+                        NSCursor.pointingHand.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+                }
+                .popover(
+                    isPresented: $showingVideoPermissionPopover,
+                    attachmentAnchor: .point(UnitPoint(x: 0.5, y: 0.0)),
+                    arrowEdge: .top
+                ) {
+                    VStack(spacing: 0) {
+                        if let fallbackMessage = videoPermissionPopoverFallbackMessage {
+                            Text(fallbackMessage)
+                                .font(.system(size: 14))
+                                .foregroundColor(popoverTextColor)
+                                .lineLimit(nil)
+                                .multilineTextAlignment(.leading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                    }
+
+                        ForEach(videoPermissionPopoverItems) { item in
+                            if item.id != videoPermissionPopoverItems.first?.id || videoPermissionPopoverFallbackMessage != nil {
+                                Divider()
+                            }
+
+                            Button(action: {
+                                showingVideoPermissionPopover = false
+                                openVideoPermissionSettings(item.settingsPane)
+                            }) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(item.message)
+                                        .font(.system(size: 14))
+                                        .lineLimit(nil)
+                                        .multilineTextAlignment(.leading)
+                                        .fixedSize(horizontal: false, vertical: true)
+
+                                    Text(item.buttonLabel)
+                                        .font(.system(size: 12))
+                                        .opacity(0.85)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundColor(popoverTextColor)
+                            .onHover { hovering in
+                                if hovering {
+                                    NSCursor.pointingHand.push()
+                                } else {
+                                    NSCursor.pop()
+                                }
+                            }
+                        }
+                    }
+                    .frame(minWidth: 300, idealWidth: 320, maxWidth: 360)
+                    .background(colorScheme == .light ? Color.white : Color.black)
+                }
+        case .backspace:
+                Button(action: {
+                    backspaceDisabled.toggle()
+                }) {
+                    Text(backspaceDisabled ? "Backspace is Off" : "Backspace is On")
+                        .foregroundColor(isHoveringBackspaceToggle ? textHoverColor : textColor)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("backspaceToggle")
+                .onHover { hovering in
+                    isHoveringBackspaceToggle = hovering
+                    isHoveringBottomNav = hovering
+                    if hovering {
+                        NSCursor.pointingHand.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+                }
+        case .fullscreen:
+                Button(isFullscreen ? "Minimize" : "Fullscreen") {
+                    if let window = NSApplication.shared.windows.first {
+                        window.toggleFullScreen(nil)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("fullscreenButton")
+                .foregroundColor(isHoveringFullscreen ? textHoverColor : textColor)
+                .onHover { hovering in
+                    isHoveringFullscreen = hovering
+                    isHoveringBottomNav = hovering
+                    if hovering {
+                        NSCursor.pointingHand.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+                }
+        case .newEntry:
+                Button(action: {
+                    createNewEntry()
+                }) {
+                    Text("New Entry")
+                        .font(.system(size: 13))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("newEntryButton")
+                .foregroundColor(isHoveringNewEntry ? textHoverColor : textColor)
+                .onHover { hovering in
+                    isHoveringNewEntry = hovering
+                    isHoveringBottomNav = hovering
+                    if hovering {
+                        NSCursor.pointingHand.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+                }
+        case .history:
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showingSidebar.toggle()
+                    }
+                }) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .foregroundColor(isHoveringClock ? textHoverColor : textColor)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(showingSidebar ? "Hide history" : "Show history")
+                .accessibilityIdentifier("historyButton")
+                .onHover { hovering in
+                    isHoveringClock = hovering
+                    isHoveringBottomNav = hovering
+                    if hovering {
+                        NSCursor.pointingHand.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+                }
+        case .settings:
+                Button(action: { SettingsWindow.toggle(openSettings) }) {
+                    Image(systemName: "gearshape")
+                        .foregroundColor(isHoveringSettings ? textHoverColor : textColor)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Settings")
+                .accessibilityIdentifier("settingsButton")
+                .help("Settings")
+                .onHover { hovering in
+                    isHoveringSettings = hovering
+                    isHoveringBottomNav = hovering
+                    if hovering {
+                        NSCursor.pointingHand.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+                }
+        }
+    }
+
     /// Saves the current text entry, then selects and loads another one (at a sealed
     /// version when `version` is given; otherwise at its current version).
     private func selectEntry(id: UUID, version: String? = nil) {
@@ -730,7 +973,7 @@ struct ContentView: View {
         case .command(let command):
             handle(command)
         case .settings:
-            openSettings()
+            SettingsWindow.toggle(openSettings)
         }
     }
 
@@ -757,9 +1000,6 @@ struct ContentView: View {
             timerIsRunning.toggle()
         case .recordVideo:
             startVideoRecordingPreflight()
-        case .openChat:
-            didCopyPrompt = false
-            showingChatMenu = true
         case .toggleBackspace:
             backspaceDisabled.toggle()
         case .toggleTheme:
@@ -966,7 +1206,8 @@ struct ContentView: View {
         showingVersionMenu = false
         voicePlayer.stop()
         if let entry, entry.entryType == .text {
-            entryManifest = try? versionStore.savedManifest(for: entry.filename)
+            // Every text entry has at least v1, so the version menu (and New Version) is always there.
+            entryManifest = versionStore.manifest(for: entry.filename)
         } else {
             entryManifest = nil
         }
@@ -1058,6 +1299,14 @@ struct ContentView: View {
             }
             do {
                 voicePlayer.stop()
+                voiceRecorder.onUnexpectedStop = { url, reason in
+                    if let url {
+                        saveVoiceNote(from: url)
+                        showStatus("\(reason) What was recorded is saved.")
+                    } else {
+                        showStatus(reason)
+                    }
+                }
                 try voiceRecorder.start()
                 withAnimation(.easeOut(duration: 0.2)) {
                     bottomNavOpacity = 1.0
@@ -1136,13 +1385,30 @@ struct ContentView: View {
         let engine = TranscriptionEngine.current
         let progress = engine == .hex ? "Transcribing with Hex…" : "Transcribing…"
         transcriptionStatuses[entryId] = progress
+        // The folder the recording was saved in. The entries folder may change while this runs.
+        let origin = versionStore
         Task {
             do {
                 let transcript = try await engine.transcribe(fileURL: attachment.audioURL)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                // Resolve paths now: the entries folder may have changed while transcribing.
-                let store = versionStore
-                try store.saveTranscript(transcript, forAudio: attachment.audioPath, entryFilename: entryFilename)
+                // The transcript goes next to the recording wherever it is now: still in the old
+                // folder ("Just Switch"), moved, or copied (then both copies get it).
+                let current = versionStore
+                let candidates = current.root == origin.root ? [origin] : [current, origin]
+                let holders = candidates.filter { store in
+                    FileManager.default.fileExists(atPath: store.url(forRelativePath: attachment.audioPath, entryFilename: entryFilename).path)
+                }
+                guard let store = holders.first else {
+                    showStatus("The voice note was moved before its transcript finished.", for: entryId)
+                    return
+                }
+                for holder in holders {
+                    do {
+                        try holder.saveTranscript(transcript, forAudio: attachment.audioPath, entryFilename: entryFilename)
+                    } catch {
+                        print("Voice note: couldn't save transcript in \(holder.root.path): \(error)")
+                    }
+                }
                 guard !transcript.isEmpty else {
                     showStatus("No speech found in the voice note.", for: entryId)
                     return
@@ -1151,13 +1417,13 @@ struct ContentView: View {
                     showStatus("Transcript saved with \(attachment.versionId).", for: entryId)
                     return
                 }
-                if selectedEntryId == entryId && currentVideoURL == nil {
+                if store.root == current.root && selectedEntryId == entryId && currentVideoURL == nil {
                     text = appending(transcript, to: text)  // autosaved like typing
                 } else {
                     let url = store.entryFileURL(for: entryFilename)
                     let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
                     try appending(transcript, to: existing).write(to: url, atomically: true, encoding: .utf8)
-                    if let entry = entries.first(where: { $0.id == entryId }) {
+                    if store.root == current.root, let entry = entries.first(where: { $0.id == entryId }) {
                         updatePreviewText(for: entry)
                     }
                 }
@@ -1177,8 +1443,13 @@ struct ContentView: View {
     }
 
     private func audioURL(for version: EntryVersion) -> URL? {
-        guard let entry = selectedTextEntry, let audio = version.audio else { return nil }
-        return versionStore.url(forRelativePath: audio, entryFilename: entry.filename)
+        audioURLs(for: version).last
+    }
+
+    /// Every voice note recorded for a version, oldest first.
+    private func audioURLs(for version: EntryVersion) -> [URL] {
+        guard let entry = selectedTextEntry else { return [] }
+        return version.allAudio.map { versionStore.url(forRelativePath: $0, entryFilename: entry.filename) }
     }
 
     var timerButtonTitle: String {
@@ -1204,11 +1475,10 @@ struct ContentView: View {
         return (fontSize * 1.5) - defaultLineHeight
     }
     
-    // Add a color utility computed property
     var popoverBackgroundColor: Color {
         return colorScheme == .light ? Color(NSColor.controlBackgroundColor) : Color(NSColor.darkGray)
     }
-    
+
     var popoverTextColor: Color {
         return colorScheme == .light ? Color.primary : Color.white
     }
@@ -1216,8 +1486,6 @@ struct ContentView: View {
     
     var body: some View {
         let navHeight: CGFloat = 68
-        let textColor = colorScheme == .light ? Color.gray : Color.gray.opacity(0.8)
-        let textHoverColor = colorScheme == .light ? Color.black : Color.white
         let isViewingVideoEntry = currentVideoURL != nil
         
         HStack(spacing: 0) {
@@ -1250,11 +1518,20 @@ struct ContentView: View {
                         isDark: colorScheme == .dark,
                         focusKey: selectedEntryId,
                         canTakeFocus: !showingCommandPalette,
-                        isEditable: viewedVersion == nil
+                        isEditable: viewedVersion == nil,
+                        verticalInset: noteTopInset
                     )
+                    // Text fades out under the thin top margin as it scrolls up.
+                    .mask {
+                        VStack(spacing: 0) {
+                            LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+                                .frame(height: noteTopInset)
+                            Color.black
+                        }
+                    }
                     .background(Color(colorScheme == .light ? .white : .black))
                     .frame(maxWidth: 650)
-                    .padding(.top, 40)
+                    .padding(.top, editorTopMargin)
                     .padding(.bottom, bottomNavOpacity > 0 ? navHeight : 0)
                     .colorScheme(colorScheme)
                     .onAppear {
@@ -1288,7 +1565,7 @@ struct ContentView: View {
                                     .font(.custom(selectedFont, size: fontSize))
                                     .foregroundColor(colorScheme == .light ? .gray.opacity(0.5) : .gray.opacity(0.6))
                                     .allowsHitTesting(false)
-                                    .offset(x: 5, y: 40)
+                                    .offset(x: 5, y: editorTopMargin + noteTopInset)
                             }
                         }, alignment: .topLeading
                     )
@@ -1301,176 +1578,30 @@ struct ContentView: View {
                 VStack {
                     Spacer()
                     HStack {
-                        if !isViewingVideoEntry {
-                            textEntryControls(textColor: textColor, textHoverColor: textHoverColor)
-                        }
-                        if isViewingVideoEntry {
-                            HStack(spacing: 8) {
-                                if let transcriptionStatus = selectedEntryId.flatMap({ transcriptionStatuses[$0] }) {
-                                    Text(transcriptionStatus)
-                                        .font(.system(size: 13))
-                                        .foregroundColor(textColor)
-                                }
-                                if selectedVideoHasTranscript {
-                                    Button(action: {
-                                        copyTranscriptForSelectedVideoEntry()
-                                    }) {
-                                        Text(didCopyTranscript ? "Copied Transcript" : "Copy Transcript")
-                                            .font(.system(size: 13))
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityIdentifier("copyTranscriptButton")
-                                    .foregroundColor(isHoveringCopyTranscript ? textHoverColor : textColor)
-                                    .onHover { hovering in
-                                        isHoveringCopyTranscript = hovering
-                                        isHoveringBottomNav = hovering
-                                        if hovering {
-                                            NSCursor.pointingHand.push()
-                                        } else {
-                                            NSCursor.pop()
-                                        }
-                                    }
-                                }
-                            }
-                            .padding(8)
-                            .cornerRadius(6)
-                            .onHover { hovering in
-                                isHoveringBottomNav = hovering
-                            }
-                        }
-                        
-                        Spacer()
-                        
-                        // Utility buttons (moved to right)
                         HStack(spacing: 8) {
-                            Button(timerButtonTitle) {
-                                let now = Date()
-                                if let lastClick = lastClickTime,
-                                   now.timeIntervalSince(lastClick) < 0.3 {
-                                    timeRemaining = sessionMinutes * 60
-                                    timerIsRunning = false
-                                    lastClickTime = nil
-                                } else {
-                                    timerIsRunning.toggle()
-                                    lastClickTime = now
-                                }
+                            if !isViewingVideoEntry && textEntryStatusVisible {
+                                textEntryStatus(textColor: textColor, textHoverColor: textHoverColor)
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(timerIsRunning ? "Pause timer" : "Start timer")
-                            .accessibilityValue(timerButtonTitle)
-                            .accessibilityIdentifier("timerButton")
-                            .foregroundColor(timerColor)
-                            .onHover { hovering in
-                                isHoveringTimer = hovering
-                                isHoveringBottomNav = hovering
-                                if hovering {
-                                    NSCursor.pointingHand.push()
-                                } else {
-                                    NSCursor.pop()
-                                }
-                            }
-                            .onAppear {
-                                guard scrollWheelMonitor == nil else { return }
-                                scrollWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
-                                    if isHoveringTimer {
-                                        let scrollBuffer = event.deltaY * 0.25
-                                        
-                                        if abs(scrollBuffer) >= 0.1 {
-                                            let currentMinutes = timeRemaining / 60
-                                            NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-                                            let direction = -scrollBuffer > 0 ? 5 : -5
-                                            let newMinutes = currentMinutes + direction
-                                            let roundedMinutes = (newMinutes / 5) * 5
-                                            let newTime = roundedMinutes * 60
-                                            timeRemaining = min(max(newTime, 0), 2700)
-                                        }
+                            if isViewingVideoEntry {
+                                HStack(spacing: 8) {
+                                    if let transcriptionStatus {
+                                        Text(transcriptionStatus)
+                                            .font(.system(size: 13))
+                                            .foregroundColor(textColor)
                                     }
-                                    return event
-                                }
-                            }
-                            .onDisappear {
-                                if let scrollWheelMonitor {
-                                    NSEvent.removeMonitor(scrollWheelMonitor)
-                                    self.scrollWheelMonitor = nil
-                                }
-                            }
-
-                            Text("•")
-                                .foregroundColor(.gray)
-
-                            // Video camera button
-                            Button(action: {
-                                guard !isPreparingVideoRecording else { return }
-                                startVideoRecordingPreflight()
-                            }) {
-                                Group {
-                                    if isPreparingVideoRecording {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                            .tint(isHoveringVideoButton ? textHoverColor : textColor)
-                                    } else {
-                                        Image(systemName: "video.fill")
-                                            .foregroundColor(isHoveringVideoButton ? textHoverColor : textColor)
-                                    }
-                                }
-                                .frame(width: 14, height: 14)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Record video")
-                            .accessibilityIdentifier("recordVideoButton")
-                            .onHover { hovering in
-                                isHoveringVideoButton = hovering
-                                isHoveringBottomNav = hovering
-                                if hovering {
-                                    NSCursor.pointingHand.push()
-                                } else {
-                                    NSCursor.pop()
-                                }
-                            }
-                            .popover(
-                                isPresented: $showingVideoPermissionPopover,
-                                attachmentAnchor: .point(UnitPoint(x: 0.5, y: 0.0)),
-                                arrowEdge: .top
-                            ) {
-                                VStack(spacing: 0) {
-                                    if let fallbackMessage = videoPermissionPopoverFallbackMessage {
-                                        Text(fallbackMessage)
-                                            .font(.system(size: 14))
-                                            .foregroundColor(popoverTextColor)
-                                            .lineLimit(nil)
-                                            .multilineTextAlignment(.leading)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .padding(.horizontal, 12)
-                                            .padding(.vertical, 8)
-                                }
-
-                                    ForEach(videoPermissionPopoverItems) { item in
-                                        if item.id != videoPermissionPopoverItems.first?.id || videoPermissionPopoverFallbackMessage != nil {
-                                            Divider()
-                                        }
-
+                                    if selectedVideoHasTranscript {
                                         Button(action: {
-                                            showingVideoPermissionPopover = false
-                                            openVideoPermissionSettings(item.settingsPane)
+                                            copyTranscriptForSelectedVideoEntry()
                                         }) {
-                                            VStack(alignment: .leading, spacing: 3) {
-                                                Text(item.message)
-                                                    .font(.system(size: 14))
-                                                    .lineLimit(nil)
-                                                    .multilineTextAlignment(.leading)
-                                                    .fixedSize(horizontal: false, vertical: true)
-
-                                                Text(item.buttonLabel)
-                                                    .font(.system(size: 12))
-                                                    .opacity(0.85)
-                                            }
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .padding(.horizontal, 12)
-                                            .padding(.vertical, 8)
+                                            Text(didCopyTranscript ? "Copied Transcript" : "Copy Transcript")
+                                                .font(.system(size: 13))
                                         }
                                         .buttonStyle(.plain)
-                                        .foregroundColor(popoverTextColor)
+                                        .accessibilityIdentifier("copyTranscriptButton")
+                                        .foregroundColor(isHoveringCopyTranscript ? textHoverColor : textColor)
                                         .onHover { hovering in
+                                            isHoveringCopyTranscript = hovering
+                                            isHoveringBottomNav = hovering
                                             if hovering {
                                                 NSCursor.pointingHand.push()
                                             } else {
@@ -1479,283 +1610,19 @@ struct ContentView: View {
                                         }
                                     }
                                 }
-                                .frame(minWidth: 300, idealWidth: 320, maxWidth: 360)
-                                .background(colorScheme == .light ? Color.white : Color.black)
                             }
+                            bottomBarGroup(bottomBarLayout.left, leading: isViewingVideoEntry ? (transcriptionStatus != nil || selectedVideoHasTranscript) : textEntryStatusVisible)
+                        }
+                        .padding(8)
+                        .cornerRadius(6)
+                        .onHover { hovering in
+                            isHoveringBottomNav = hovering
+                        }
 
-                            Text("•")
-                                .foregroundColor(.gray)
+                        Spacer()
 
-                            voiceNoteButton(textColor: textColor, textHoverColor: textHoverColor)
-
-                            Text("•")
-                                .foregroundColor(.gray)
-
-                            Button("Chat") {
-                                showingChatMenu = true
-                                // Ensure didCopyPrompt is reset when opening the menu
-                                didCopyPrompt = false
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("chatButton")
-                            .foregroundColor(isHoveringChat ? textHoverColor : textColor)
-                            .onHover { hovering in
-                                isHoveringChat = hovering
-                                isHoveringBottomNav = hovering
-                                if hovering {
-                                    NSCursor.pointingHand.push()
-                                } else {
-                                    NSCursor.pop()
-                                }
-                            }
-                            .popover(isPresented: $showingChatMenu, attachmentAnchor: .point(UnitPoint(x: 0.5, y: 0)), arrowEdge: .top) {
-                                VStack(spacing: 0) { // Wrap everything in a VStack for consistent styling and onChange
-                                    let isVideoEntry = currentVideoURL != nil
-                                    let chatSourceText = currentChatSourceText()
-                                    
-                                    // Calculate potential URL lengths
-                                    let gptFullText = aiChatPrompt + "\n\n" + chatSourceText
-                                    let claudeFullText = claudePrompt + "\n\n" + chatSourceText
-                                    let gptUrlLength = chatURLString(base: chatGPTBaseURL, text: gptFullText).count
-                                    let claudeUrlLength = chatURLString(base: claudeBaseURL, text: claudeFullText).count
-                                    let isUrlTooLong = gptUrlLength > 6000 || claudeUrlLength > 6000
-                                    
-                                    if isUrlTooLong {
-                                        // View for long text (URL too long)
-                                        Text("Hey, your entry is quite long. You'll need to manually copy the prompt by clicking 'Copy Prompt' below and then paste it into AI of your choice (ex. ChatGPT). The prompt includes your entry as well. So just copy paste and go! See what the AI says.")
-                                            .font(.system(size: 14))
-                                            .foregroundColor(popoverTextColor)
-                                            .lineLimit(nil)
-                                            .multilineTextAlignment(.leading)
-                                            .frame(width: 200, alignment: .leading)
-                                            .padding(.horizontal, 12)
-                                            .padding(.vertical, 8)
-                                        
-                                        Divider()
-                                        
-                                        Button(action: {
-                                            copyPromptToClipboard()
-                                            didCopyPrompt = true
-                                        }) {
-                                            Text(didCopyPrompt ? "Copied!" : "Copy Prompt")
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .padding(.horizontal, 12)
-                                                .padding(.vertical, 8)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .foregroundColor(popoverTextColor)
-                                        .onHover { hovering in
-                                            if hovering {
-                                                NSCursor.pointingHand.push()
-                                            } else {
-                                                NSCursor.pop()
-                                            }
-                                        }
-                                        
-                                    } else if !isVideoEntry && text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("hi. my name is farza.") {
-                                        Text("Yo. Sorry, you can't chat with the guide lol. Please write your own entry.")
-                                            .font(.system(size: 14))
-                                            .foregroundColor(popoverTextColor)
-                                            .frame(width: 250)
-                                            .padding(.horizontal, 12)
-                                            .padding(.vertical, 8)
-                                    } else if !isVideoEntry && text.count < 350 {
-                                        Text("Please free write for at minimum 5 minutes first. Then click this. Trust.")
-                                            .font(.system(size: 14))
-                                            .foregroundColor(popoverTextColor)
-                                            .frame(width: 250)
-                                            .padding(.horizontal, 12)
-                                            .padding(.vertical, 8)
-                                    } else {
-                                        // View for normal text length
-                                        Button(action: {
-                                            showingChatMenu = false
-                                            openChatGPT()
-                                        }) {
-                                            Text("ChatGPT")
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .padding(.horizontal, 12)
-                                                .padding(.vertical, 8)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .foregroundColor(popoverTextColor)
-                                        .onHover { hovering in
-                                            if hovering {
-                                                NSCursor.pointingHand.push()
-                                            } else {
-                                                NSCursor.pop()
-                                            }
-                                        }
-                                        
-                                        Divider()
-                                        
-                                        Button(action: {
-                                            showingChatMenu = false
-                                            openClaude()
-                                        }) {
-                                            Text("Claude")
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .padding(.horizontal, 12)
-                                                .padding(.vertical, 8)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .foregroundColor(popoverTextColor)
-                                        .onHover { hovering in
-                                            if hovering {
-                                                NSCursor.pointingHand.push()
-                                            } else {
-                                                NSCursor.pop()
-                                            }
-                                        }
-                                        
-                                        Divider()
-                                        
-                                        Button(action: {
-                                            // Don't dismiss menu, just copy and update state
-                                            copyPromptToClipboard()
-                                            didCopyPrompt = true
-                                        }) {
-                                            Text(didCopyPrompt ? "Copied!" : "Copy Prompt")
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .padding(.horizontal, 12)
-                                                .padding(.vertical, 8)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .foregroundColor(popoverTextColor)
-                                        .onHover { hovering in
-                                            if hovering {
-                                                NSCursor.pointingHand.push()
-                                            } else {
-                                                NSCursor.pop()
-                                            }
-                                        }
-                                    }
-                                }
-                                .frame(minWidth: 120, maxWidth: 250) // Allow width to adjust
-                                .background(popoverBackgroundColor)
-                                .cornerRadius(8)
-                                .shadow(color: Color.black.opacity(0.1), radius: 4, y: 2)
-                                // Reset copied state when popover dismisses
-                                .onChange(of: showingChatMenu) { _, newValue in
-                                    if !newValue {
-                                        didCopyPrompt = false
-                                    }
-                                }
-                            }
-                            
-                            Text("•")
-                                .foregroundColor(.gray)
-
-                            if !isViewingVideoEntry {
-                                // Backspace toggle button
-                                Button(action: {
-                                    backspaceDisabled.toggle()
-                                }) {
-                                    Text(backspaceDisabled ? "Backspace is Off" : "Backspace is On")
-                                        .foregroundColor(isHoveringBackspaceToggle ? textHoverColor : textColor)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityIdentifier("backspaceToggle")
-                                .onHover { hovering in
-                                    isHoveringBackspaceToggle = hovering
-                                    isHoveringBottomNav = hovering
-                                    if hovering {
-                                        NSCursor.pointingHand.push()
-                                    } else {
-                                        NSCursor.pop()
-                                    }
-                                }
-
-                                Text("•")
-                                    .foregroundColor(.gray)
-                            }
-
-                            Button(isFullscreen ? "Minimize" : "Fullscreen") {
-                                if let window = NSApplication.shared.windows.first {
-                                    window.toggleFullScreen(nil)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("fullscreenButton")
-                            .foregroundColor(isHoveringFullscreen ? textHoverColor : textColor)
-                            .onHover { hovering in
-                                isHoveringFullscreen = hovering
-                                isHoveringBottomNav = hovering
-                                if hovering {
-                                    NSCursor.pointingHand.push()
-                                } else {
-                                    NSCursor.pop()
-                                }
-                            }
-                            
-                            Text("•")
-                                .foregroundColor(.gray)
-                            
-                            Button(action: {
-                                createNewEntry()
-                            }) {
-                                Text("New Entry")
-                                    .font(.system(size: 13))
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("newEntryButton")
-                            .foregroundColor(isHoveringNewEntry ? textHoverColor : textColor)
-                            .onHover { hovering in
-                                isHoveringNewEntry = hovering
-                                isHoveringBottomNav = hovering
-                                if hovering {
-                                    NSCursor.pointingHand.push()
-                                } else {
-                                    NSCursor.pop()
-                                }
-                            }
-                            
-                            Text("•")
-                                .foregroundColor(.gray)
-                            
-                            // Version history button
-                            Button(action: {
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    showingSidebar.toggle()
-                                }
-                            }) {
-                                Image(systemName: "clock.arrow.circlepath")
-                                    .foregroundColor(isHoveringClock ? textHoverColor : textColor)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(showingSidebar ? "Hide history" : "Show history")
-                            .accessibilityIdentifier("historyButton")
-                            .onHover { hovering in
-                                isHoveringClock = hovering
-                                isHoveringBottomNav = hovering
-                                if hovering {
-                                    NSCursor.pointingHand.push()
-                                } else {
-                                    NSCursor.pop()
-                                }
-                            }
-
-                            Text("•")
-                                .foregroundColor(.gray)
-
-                            // Settings (font, theme, timer length, shortcuts)
-                            SettingsLink {
-                                Image(systemName: "gearshape")
-                                    .foregroundColor(isHoveringSettings ? textHoverColor : textColor)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Settings")
-                            .accessibilityIdentifier("settingsButton")
-                            .help("Settings")
-                            .onHover { hovering in
-                                isHoveringSettings = hovering
-                                isHoveringBottomNav = hovering
-                                if hovering {
-                                    NSCursor.pointingHand.push()
-                                } else {
-                                    NSCursor.pop()
-                                }
-                            }
+                        HStack(spacing: 8) {
+                            bottomBarGroup(bottomBarLayout.right)
                         }
                         .padding(8)
                         .cornerRadius(6)
@@ -2080,51 +1947,53 @@ struct ContentView: View {
         }
     }
 
-    /// Bottom-left for text entries: version menu (once there's more than one version or a
-    /// voice note), the current version's voice note, and transient status.
+    /// Version menu button (bottom bar item): shows the displayed version; click to switch
+    /// versions or start a new one.
     @ViewBuilder
-    private func textEntryControls(textColor: Color, textHoverColor: Color) -> some View {
-        HStack(spacing: 8) {
-            if let manifest = entryManifest, manifest.isInteresting {
-                Button(action: {
-                    showingVersionMenu.toggle()
-                }) {
-                    HStack(spacing: 3) {
-                        Text(displayedVersion?.id ?? manifest.current)
-                            .font(.system(size: 13).monospacedDigit())
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 9))
-                    }
-                    .foregroundColor(isHoveringVersion ? textHoverColor : textColor)
+    private func versionsButton(textColor: Color, textHoverColor: Color) -> some View {
+        if let manifest = entryManifest {
+            Button(action: {
+                showingVersionMenu.toggle()
+            }) {
+                HStack(spacing: 3) {
+                    Text(displayedVersion?.id ?? manifest.current)
+                        .font(.system(size: 13).monospacedDigit())
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 9))
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Version \(displayedVersion?.n ?? 1) of \(manifest.versions.count)")
-                .accessibilityIdentifier("versionButton")
-                .help("Versions")
-                .onHover { hovering in
-                    isHoveringVersion = hovering
-                    hoverCursor(hovering)
-                }
-                .popover(isPresented: $showingVersionMenu, attachmentAnchor: .point(UnitPoint(x: 0.5, y: 0)), arrowEdge: .top) {
-                    versionMenu(manifest)
-                }
-
-                if viewedVersion == nil, let current = manifest.currentVersion, let url = audioURL(for: current) {
-                    Text("•")
-                        .foregroundColor(.gray)
-                    playVoiceNoteButton(url: url, textColor: textColor, textHoverColor: textHoverColor)
-                }
+                .foregroundColor(isHoveringVersion ? textHoverColor : textColor)
             }
-            if let transcriptionStatus {
-                Text(transcriptionStatus)
-                    .font(.system(size: 13))
-                    .foregroundColor(textColor)
-                    .lineLimit(1)
+            .buttonStyle(.plain)
+            .accessibilityLabel("Version \(displayedVersion?.n ?? 1) of \(manifest.versions.count)")
+            .accessibilityIdentifier("versionButton")
+            .help("Versions")
+            .onHover { hovering in
+                isHoveringVersion = hovering
+                isHoveringBottomNav = hovering
+                hoverCursor(hovering)
+            }
+            .popover(isPresented: $showingVersionMenu, attachmentAnchor: .point(UnitPoint(x: 0.5, y: 0)), arrowEdge: .top) {
+                versionMenu(manifest)
             }
         }
-        .padding(8)
-        .onHover { hovering in
-            isHoveringBottomNav = hovering
+    }
+
+    /// Fixed start of the left side for text entries: the current version's voice note and
+    /// transient status (transcribing, errors).
+    private var textEntryStatusVisible: Bool {
+        transcriptionStatus != nil || (viewedVersion == nil && entryManifest?.currentVersion.flatMap(audioURL(for:)) != nil)
+    }
+
+    @ViewBuilder
+    private func textEntryStatus(textColor: Color, textHoverColor: Color) -> some View {
+        if viewedVersion == nil, let current = entryManifest?.currentVersion, !audioURLs(for: current).isEmpty {
+            playVoiceNotes(audioURLs(for: current), textColor: textColor, textHoverColor: textHoverColor)
+        }
+        if let transcriptionStatus {
+            Text(transcriptionStatus)
+                .font(.system(size: 13))
+                .foregroundColor(textColor)
+                .lineLimit(1)
         }
     }
 
@@ -2201,10 +2070,10 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 Text("Viewing \(version.id) · read-only")
                     .foregroundColor(textColor)
-                if let url = audioURL(for: version) {
+                if !audioURLs(for: version).isEmpty {
                     Text("•")
                         .foregroundColor(.gray)
-                    playVoiceNoteButton(url: url, textColor: textColor, textHoverColor: textHoverColor)
+                    playVoiceNotes(audioURLs(for: version), textColor: textColor, textHoverColor: textHoverColor)
                 }
                 Text("•")
                     .foregroundColor(.gray)
@@ -2226,6 +2095,40 @@ struct ContentView: View {
             .font(.system(size: 13))
             .padding(.top, 12)
             Spacer()
+        }
+    }
+
+    /// One play button, or a menu of every voice note when a version has more than one.
+    @ViewBuilder
+    private func playVoiceNotes(_ urls: [URL], textColor: Color, textHoverColor: Color) -> some View {
+        if urls.count == 1, let url = urls.first {
+            playVoiceNoteButton(url: url, textColor: textColor, textHoverColor: textHoverColor)
+        } else {
+            let playing = urls.firstIndex { voicePlayer.url == $0 && voicePlayer.isPlaying }
+            Menu {
+                ForEach(Array(urls.enumerated()), id: \.element) { index, url in
+                    Button(voicePlayer.url == url && voicePlayer.isPlaying ? "Pause voice note \(index + 1)" : "Play voice note \(index + 1)") {
+                        voicePlayer.toggle(url)
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: playing == nil ? "play.fill" : "pause.fill")
+                        .font(.system(size: 10))
+                    Text(playing.map { "Voice note \($0 + 1) of \(urls.count)" } ?? "\(urls.count) voice notes")
+                        .font(.system(size: 13))
+                }
+                .foregroundColor(isHoveringPlayVoiceNote ? textHoverColor : textColor)
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityIdentifier("playVoiceNotesMenu")
+            .onHover { hovering in
+                isHoveringPlayVoiceNote = hovering
+                hoverCursor(hovering)
+            }
         }
     }
 
@@ -2496,50 +2399,6 @@ struct ContentView: View {
         }
     }
     
-    private let chatGPTBaseURL = "https://chatgpt.com/?prompt="
-    private let claudeBaseURL = "https://claude.ai/new?q="
-
-    // .urlQueryAllowed leaves &, = and + unescaped, which would cut the prompt off at the first "&".
-    private func chatURLString(base: String, text: String) -> String {
-        var allowed = CharacterSet.urlQueryAllowed
-        allowed.remove(charactersIn: "&=+?#")
-        return base + (text.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")
-    }
-
-    private func openChatGPT() {
-        let fullText = aiChatPrompt + "\n\n" + currentChatSourceText()
-        if let url = URL(string: chatURLString(base: chatGPTBaseURL, text: fullText)) {
-            NSWorkspace.shared.open(url)
-        }
-    }
-    
-    private func openClaude() {
-        let fullText = claudePrompt + "\n\n" + currentChatSourceText()
-        if let url = URL(string: chatURLString(base: claudeBaseURL, text: fullText)) {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
-    private func copyPromptToClipboard() {
-        let fullText = aiChatPrompt + "\n\n" + currentChatSourceText()
-
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(fullText, forType: .string)
-        print("Prompt copied to clipboard")
-    }
-
-    private func currentChatSourceText() -> String {
-        if currentVideoURL != nil,
-           let selectedEntryId,
-           let selectedEntry = entries.first(where: { $0.id == selectedEntryId }),
-           let videoFilename = resolvedVideoFilename(for: selectedEntry),
-           let transcript = loadTranscriptText(for: videoFilename) {
-            return transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return (viewedVersion == nil ? text : viewedVersionText).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     private func saveVideoEntry(from tempURL: URL, transcript: String?) {
         let replacementEntry = selectedEntryId
             .flatMap { id in entries.first(where: { $0.id == id }) }
@@ -2547,7 +2406,7 @@ struct ContentView: View {
                 guard entry.entryType == .text else { return nil }
                 guard text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
                 // An entry with versions or a voice note keeps them; the video gets its own entry.
-                guard entryManifest == nil else { return nil }
+                guard entryManifest?.isInteresting != true else { return nil }
                 return entry
             }
 

@@ -11,7 +11,7 @@ import Observation
 
 @MainActor
 @Observable
-final class VoiceNoteRecorder {
+final class VoiceNoteRecorder: NSObject, AVAudioRecorderDelegate {
     private(set) var isRecording = false
     private(set) var elapsed: TimeInterval = 0
     /// Recent input levels (0…1), oldest first, for the bottom-bar meter.
@@ -21,6 +21,9 @@ final class VoiceNoteRecorder {
 
     @ObservationIgnored private var recorder: AVAudioRecorder?
     @ObservationIgnored private var meterTimer: Timer?
+    /// Called when recording stops on its own (device lost, encoder error). Gets whatever audio
+    /// was captured (nil if none) and a message for the user.
+    @ObservationIgnored var onUnexpectedStop: ((URL?, String) -> Void)?
 
     /// Whether the microphone may be used, asking the first time.
     static func requestMicrophoneAccess() async -> Bool {
@@ -43,6 +46,7 @@ final class VoiceNoteRecorder {
             AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
         ]
         let recorder = try AVAudioRecorder(url: url, settings: settings)
+        recorder.delegate = self
         recorder.isMeteringEnabled = true
         guard recorder.record() else {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: "Couldn't start recording."])
@@ -85,6 +89,33 @@ final class VoiceNoteRecorder {
         meterTimer = nil
         recorder = nil
         isRecording = false
+    }
+
+    // Stop/Discard clear `recorder` before stopping it, so a callback for the current recorder
+    // means capture ended without the user asking.
+    nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        let id = ObjectIdentifier(recorder)
+        Task { @MainActor in
+            self.handleUnexpectedStop(of: id, reason: flag ? "Recording stopped." : "Recording failed.")
+        }
+    }
+
+    nonisolated func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
+        let id = ObjectIdentifier(recorder)
+        let message = error?.localizedDescription ?? "unknown error"
+        Task { @MainActor in
+            self.handleUnexpectedStop(of: id, reason: "Recording failed: \(message)")
+        }
+    }
+
+    private func handleUnexpectedStop(of id: ObjectIdentifier, reason: String) {
+        guard let recorder, ObjectIdentifier(recorder) == id else { return }
+        let url = recorder.url
+        let captured = elapsed > 0.3 && FileManager.default.fileExists(atPath: url.path)
+        finish()
+        recorder.stop()
+        if !captured { try? FileManager.default.removeItem(at: url) }
+        onUnexpectedStop?(captured ? url : nil, reason)
     }
 
     private func tick() {

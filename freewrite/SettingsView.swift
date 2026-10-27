@@ -45,7 +45,6 @@ enum AppCommand: String, CaseIterable, Identifiable {
     case toggleTimer
     case recordVideo
     case recordVoiceNote
-    case openChat
     case toggleBackspace
     case toggleTheme
     case increaseFontSize
@@ -62,7 +61,6 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .toggleTimer: return "Start/Pause Timer"
         case .recordVideo: return "Record Video"
         case .recordVoiceNote: return "Record Voice Note"
-        case .openChat: return "Chat"
         case .toggleBackspace: return "Toggle Backspace"
         case .toggleTheme: return "Toggle Light/Dark"
         case .increaseFontSize: return "Bigger Text"
@@ -79,7 +77,6 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .toggleTimer: return KeyShortcut(key: "t", modifiers: [.command])
         case .recordVideo: return KeyShortcut(key: "r", modifiers: [.command, .shift])
         case .recordVoiceNote: return KeyShortcut(key: "v", modifiers: [.command, .shift])
-        case .openChat: return KeyShortcut(key: "c", modifiers: [.command, .shift])
         case .toggleBackspace: return KeyShortcut(key: "b", modifiers: [.command, .shift])
         case .toggleTheme: return KeyShortcut(key: "l", modifiers: [.command, .shift])
         case .increaseFontSize: return KeyShortcut(key: "=", modifiers: [.command])
@@ -223,11 +220,32 @@ enum WritingWindow {
     static var openCount = 0
 }
 
+/// Opens the Settings window, or closes it when it's already open (⌘, and the gear toggle it).
+@MainActor
+enum SettingsWindow {
+    static var window: NSWindow? {
+        NSApp.windows.first { $0.identifier?.rawValue.contains("Settings") == true && $0.isVisible }
+    }
+
+    static func toggle(_ openSettings: OpenSettingsAction) {
+        if let window {
+            window.performClose(nil)
+        } else {
+            openSettings()
+        }
+    }
+}
+
 struct FreewriteCommands: Commands {
     @AppStorage(SettingsKey.shortcuts) private var shortcutsJSON = "{}"
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
 
     var body: some Commands {
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings…") { SettingsWindow.toggle(openSettings) }
+                .keyboardShortcut(",", modifiers: .command)
+        }
         CommandGroup(replacing: .newItem) {
             button(for: .newEntry)
             button(for: .newVersion)
@@ -242,7 +260,6 @@ struct FreewriteCommands: Commands {
             Divider()
             button(for: .recordVideo)
             button(for: .recordVoiceNote)
-            button(for: .openChat)
         }
         CommandGroup(after: .sidebar) {
             button(for: .toggleHistory)
@@ -272,20 +289,66 @@ struct FreewriteCommands: Commands {
 
 // MARK: - Settings window
 
-struct SettingsView: View {
-    var body: some View {
-        TabView {
-            WritingSettingsView()
-                .tabItem { Label("Writing", systemImage: "textformat") }
-            TranscriptionSettingsView()
-                .tabItem { Label("Transcription", systemImage: "waveform") }
-            StorageSettingsView()
-                .tabItem { Label("Storage", systemImage: "folder") }
-            ShortcutSettingsView()
-                .tabItem { Label("Shortcuts", systemImage: "keyboard") }
+private enum SettingsPane: String, CaseIterable, Identifiable {
+    case writing
+    case transcription
+    case storage
+    case bottomBar
+    case shortcuts
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .writing: return "Writing"
+        case .transcription: return "Transcription"
+        case .storage: return "Storage"
+        case .bottomBar: return "Bottom Bar"
+        case .shortcuts: return "Shortcuts"
         }
-        .frame(width: 520)
-        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    var systemImage: String {
+        switch self {
+        case .writing: return "textformat"
+        case .transcription: return "waveform"
+        case .storage: return "folder"
+        case .bottomBar: return "dock.rectangle"
+        case .shortcuts: return "keyboard"
+        }
+    }
+}
+
+struct SettingsView: View {
+    @AppStorage("settingsPane") private var selectedPane: SettingsPane = .writing
+
+    var body: some View {
+        NavigationSplitView {
+            List(SettingsPane.allCases, selection: Binding(
+                get: { Optional(selectedPane) },
+                set: { if let pane = $0 { selectedPane = pane } }
+            )) { pane in
+                Label(pane.title, systemImage: pane.systemImage)
+                    .tag(pane)
+            }
+            .navigationSplitViewColumnWidth(180)
+            .toolbar(removing: .sidebarToggle)
+        } detail: {
+            pane(selectedPane)
+                .navigationTitle(selectedPane.title)
+        }
+        .frame(width: 720, height: 520)
+    }
+
+    @ViewBuilder
+    private func pane(_ pane: SettingsPane) -> some View {
+        switch pane {
+        case .writing: WritingSettingsView()
+        case .transcription: TranscriptionSettingsView()
+        case .storage: StorageSettingsView()
+        case .bottomBar: BottomBarSettingsView()
+        case .shortcuts: ShortcutSettingsView()
+        }
     }
 }
 

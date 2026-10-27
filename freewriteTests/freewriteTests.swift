@@ -94,6 +94,26 @@ struct StorageTransferTests {
         #expect(read("holiday.mov", in: destination) == nil)
     }
 
+    @Test func versionFolderMovesAsAUnit() throws {
+        let source = try makeFolder()
+        let destination = try makeFolder()
+        let base = "[7C1D2E3F-1111-4A2B-9C3D-0123456789AB]-[2026-10-27-09-12-00]"
+        // Destination holds an older copy of the entry's history; the source has a newer one.
+        try write("{\"current\":\"v2\"}", "Entries/\(base)/entry.json", in: destination)
+        try write("old v1", "Entries/\(base)/versions/v1.md", in: destination)
+        try write("{\"current\":\"v3\"}", "Entries/\(base)/entry.json", in: source)
+        try write("v1", "Entries/\(base)/versions/v1.md", in: source)
+        try write("v2", "Entries/\(base)/versions/v2.md", in: source)
+
+        let report = StorageTransfer.transfer(from: source, to: destination, mode: .move)
+
+        // Nothing from the newer history is mixed into the older folder or removed from the source.
+        #expect(read("Entries/\(base)/versions/v2.md", in: destination) == nil)
+        #expect(read("Entries/\(base)/entry.json", in: destination) == "{\"current\":\"v2\"}")
+        #expect(read("Entries/\(base)/versions/v2.md", in: source) == "v2")
+        #expect(report.skipped.contains("Entries/\(base)/versions/v2.md"))
+    }
+
     @Test func recognizesEntryFilenames() {
         #expect(StorageTransfer.isEntryFilename(entry))
         #expect(StorageTransfer.isEntryFilename("[6910BBDE-75FC-415C-ABB9-C76644B037B2]-[2026-02-20-08-01-04].mov"))

@@ -250,6 +250,13 @@ enum StorageTransfer {
     }
 
     /// Relative paths of every Freewrite file in `root`, sorted.
+    /// `Entries/<entry>` for a path inside an entry's version folder, else nil.
+    static func entryFolder(of item: String) -> String? {
+        let parts = item.split(separator: "/", maxSplits: 2, omittingEmptySubsequences: true)
+        guard parts.count == 3, parts[0] == EntryVersionStore.directoryName else { return nil }
+        return parts[0] + "/" + parts[1]
+    }
+
     static func items(in root: URL) -> [String] {
         let fileManager = FileManager.default
         var result: [String] = []
@@ -278,7 +285,19 @@ enum StorageTransfer {
     static func copy(from source: URL, to destination: URL, alreadyCopied: Set<String> = []) -> Report {
         let fileManager = FileManager.default
         var report = Report()
-        for item in items(in: source) {
+        let sourceItems = items(in: source)
+        // An entry's version folder (`Entries/<entry>/`) moves as a unit: if the destination
+        // already has that folder from elsewhere, none of it is copied, so its entry.json and
+        // versions never mix with another copy's history.
+        let ownedFolders = Set(alreadyCopied.compactMap(entryFolder(of:)))
+        let blockedFolders = Set(sourceItems.compactMap(entryFolder(of:)).filter { folder in
+            !ownedFolders.contains(folder) && fileManager.fileExists(atPath: destination.appendingPathComponent(folder).path)
+        })
+        for item in sourceItems {
+            if let folder = entryFolder(of: item), blockedFolders.contains(folder) {
+                report.skipped.append(item)
+                continue
+            }
             let sourceURL = source.appendingPathComponent(item)
             let destinationURL = destination.appendingPathComponent(item)
             let exists = fileManager.fileExists(atPath: destinationURL.path)

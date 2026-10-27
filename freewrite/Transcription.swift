@@ -347,7 +347,7 @@ enum AppleFileTranscriber {
         var errorDescription: String? {
             switch self {
             case .notAuthorized: return "Speech recognition isn't allowed. Turn it on in System Settings › Privacy & Security."
-            case .unavailable: return "Speech recognition isn't available for your language."
+            case .unavailable: return "On-device speech recognition isn't available for your language. Try Hex in Settings › Transcription."
             }
         }
     }
@@ -407,11 +407,13 @@ enum AppleFileTranscriber {
     }
 
     private static func transcribeWithRecognizer(fileURL: URL, locale: Locale) async throws -> String {
-        guard let recognizer = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer(), recognizer.isAvailable else {
+        // "Apple (on-device)" never sends audio to Apple's servers: no local model, no transcript.
+        guard let recognizer = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer(),
+              recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
             throw Failure.unavailable
         }
         let request = SFSpeechURLRecognitionRequest(url: fileURL)
-        request.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
+        request.requiresOnDeviceRecognition = true
         request.shouldReportPartialResults = false
         request.addsPunctuation = true
 
