@@ -107,6 +107,8 @@ struct EntryVersionStore: Sendable {
     /// Keys for locked entries while they are open (`NoteLockSession`); nil = locked entries
     /// can't be read or written.
     var cipher: NoteCipher?
+    /// Writes and deletes of locking, unlocking and recovery-key changes (tests inject failures).
+    var lockFileOperations: any NoteLockFileOperations = StandardNoteLockFileOperations()
 
     init(root: URL, cipher: NoteCipher? = nil) {
         self.root = root

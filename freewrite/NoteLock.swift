@@ -40,6 +40,10 @@ enum NoteLockError: LocalizedError, Equatable {
     case alreadyLocked
     case notLocked
     case cancelled
+    case deviceKeyUnusable
+    case busy
+    /// A plain file that differs from the decrypted one is where unlocking would write.
+    case plainCopyConflict(String)
 
     var errorDescription: String? {
         switch self {
@@ -56,6 +60,9 @@ enum NoteLockError: LocalizedError, Equatable {
         case .alreadyLocked: return "This note is already locked."
         case .notLocked: return "This note isn't locked."
         case .cancelled: return "Cancelled."
+        case .deviceKeyUnusable: return "This Mac's key for locked notes can't be used (for example after restoring this Mac from another one). Use Unlock with Recovery Key in Settings › Privacy."
+        case .busy: return "Wait until the entries folder has finished moving."
+        case .plainCopyConflict(let name): return "A different plain copy of “\(name)” is next to this locked note, so it wasn't unlocked. Move that file somewhere else first."
         }
     }
 }
@@ -300,12 +307,15 @@ struct NoteKeyring: Codable, Equatable, Sendable {
         entries.first(where: { $0.id == primaryID }).map { RecoveryKey(secret: $0.recoverySecret) }
     }
 
-    /// Gives the primary key a new recovery key. Files keep opening with the old one until
-    /// they are rewritten (`EntryVersionStore.resealLockedFiles`).
-    mutating func replacePrimaryRecoveryKey(with recovery: RecoveryKey) throws {
-        guard let index = entries.firstIndex(where: { $0.id == primaryID }) else { throw NoteLockError.noVault }
-        entries[index].recoverySecret = recovery.secret
-        entries[index].recoveryWrap = try recovery.wrap(SymmetricKey(data: entries[index].key), keyID: primaryID)
+    /// Gives every key (the primary one and any recovered from other Macs) the same new recovery
+    /// key. Files keep opening with the old one until they are rewritten
+    /// (`EntryVersionStore.stageReseal` / `commitReseal`).
+    mutating func replaceRecoveryKey(with recovery: RecoveryKey) throws {
+        guard !entries.isEmpty else { throw NoteLockError.noVault }
+        for index in entries.indices {
+            entries[index].recoverySecret = recovery.secret
+            entries[index].recoveryWrap = try recovery.wrap(SymmetricKey(data: entries[index].key), keyID: entries[index].id)
+        }
     }
 
     /// Adds a key recovered on this Mac; it becomes primary if the keyring had none.
@@ -490,6 +500,26 @@ final class SoftwareKeyProvider: NoteDeviceKeyProvider {
     }
 }
 
+/// Result of `NoteLockSession.replaceRecoveryKey`.
+struct RecoveryKeyRotation: Equatable {
+    let recoveryKey: RecoveryKey
+    /// Locked files rewritten with the new recovery key.
+    let updatedFiles: Int
+    /// Locked notes (logical `.md` names) with a file that still carries an older recovery key:
+    /// it couldn't be rewritten, or this Mac has no key for it.
+    let notUpdated: [String]
+}
+
+/// Result of `NoteLockSession.importKeys`.
+struct RecoveryImport: Equatable {
+    /// Keys added to this Mac's keyring.
+    let added: Int
+    /// Set when this Mac's vault couldn't be read or opened and was replaced; the old file.
+    let replacedVaultBackup: URL?
+    /// Keys of locked notes in the folder this Mac still can't open (another recovery key).
+    let stillUnknown: Int
+}
+
 // MARK: - Session
 
 extension SettingsKey {
@@ -517,8 +547,11 @@ final class NoteLockSession {
     /// Keys of the open session; nil while locked notes are closed.
     private(set) var cipher: NoteCipher?
     private(set) var vault: NoteVaultFile?
-    /// Set when vault.json exists but can't be read (it is never overwritten then).
+    /// Set when vault.json exists but can't be read (it is only replaced, after being backed
+    /// up, by Unlock with Recovery Key).
     private(set) var vaultError: String?
+    /// Goes up every time locked notes close (idle, sleep, screen lock, Lock Now).
+    private(set) var lockCount = 0
 
     var isUnlocked: Bool { cipher != nil }
     var hasVault: Bool { vault != nil }
@@ -574,6 +607,8 @@ final class NoteLockSession {
 
     /// Closes locked notes: forgets the keys and the authentication.
     func lock() {
+        // Counted even when nothing was open, so views can hide secrets (e.g. a recovery key).
+        lockCount += 1
         guard cipher != nil || keyring != nil else { return }
         keyring = nil
         cipher = nil
@@ -588,44 +623,85 @@ final class NoteLockSession {
         return recovery
     }
 
-    /// Replaces the recovery key of the primary content key. Returns the new key; locked files
-    /// still need resealing with the new `cipher` so their headers carry the new wrap.
-    func replaceRecoveryKey(reason: String = "create a new recovery key") async throws -> RecoveryKey {
+    /// Gives every key a new recovery key and rewrites the locked files of `folder()` so their
+    /// headers carry it. Every rewritten file is first staged as a hidden copy and checked; if
+    /// that fails nothing changes (the old key stays the recovery key). Only then is the new
+    /// keyring saved and the copies moved into place, so the caller must show the new key from
+    /// here on, even when some notes couldn't be updated (`notUpdated`, which still open with
+    /// the old recovery key).
+    func replaceRecoveryKey(reason: String = "create a new recovery key", in folder: () throws -> EntryVersionStore) async throws -> RecoveryKeyRotation {
         var keyring = try await authenticatedKeyring(reason: reason)
         let recovery = RecoveryKey.generate()
-        try keyring.replacePrimaryRecoveryKey(with: recovery)
-        try save(keyring, newDeviceKey: false)
+        try keyring.replaceRecoveryKey(with: recovery)
+        var store = try folder()
+        store.cipher = keyring.cipher
+        let staged = try store.stageReseal()
+        do {
+            try save(keyring, newDeviceKey: false)
+        } catch {
+            store.discardReseal(staged)
+            throw error
+        }
         open(keyring)
-        return recovery
+        let failed = store.commitReseal(staged)
+        return RecoveryKeyRotation(
+            recoveryKey: recovery,
+            updatedFiles: staged.files.count - failed.files,
+            notUpdated: Array(Set(staged.skipped).union(failed.entries)).sorted()
+        )
     }
 
     /// Adds every content key that `recovery` unwraps from `wraps` (key id → recovery wrap, read
-    /// from locked files' headers). Returns how many keys were added.
-    func importKeys(with recovery: RecoveryKey, from wraps: [Data: Data]) async throws -> Int {
-        var recovered: [(id: Data, key: SymmetricKey, wrap: Data)] = []
-        for (id, wrap) in wraps.sorted(by: { $0.key.base64EncodedString() < $1.key.base64EncodedString() }) where !hasKey(id) {
-            if let key = try? recovery.unwrap(wrap, keyID: id) {
-                recovered.append((id, key, wrap))
+    /// from locked files' headers). If this Mac's vault can't be read or its device key can't be
+    /// used (e.g. restored from another Mac), a new vault is made from the recovered keys; the
+    /// old file is kept next to it (`replacedVaultBackup`), never deleted.
+    func importKeys(with recovery: RecoveryKey, from wraps: [Data: Data]) async throws -> RecoveryImport {
+        guard !wraps.isEmpty else { return RecoveryImport(added: 0, replacedVaultBackup: nil, stillUnknown: 0) }
+        let recovered: [(id: Data, key: SymmetricKey, wrap: Data)] = wraps
+            .sorted(by: { $0.key.base64EncodedString() < $1.key.base64EncodedString() })
+            .compactMap { id, wrap in (try? recovery.unwrap(wrap, keyID: id)).map { (id, $0, wrap) } }
+        guard !recovered.isEmpty else { throw NoteLockError.wrongRecoveryKey }
+
+        // The keyring this Mac has now, if it can still be opened.
+        var existing: NoteKeyring?
+        if let openKeyring = keyring {
+            existing = openKeyring
+        } else if let vault {
+            try await provider.authenticate(reason: "add your recovery key")
+            existing = try? openVault(vault)
+        }
+
+        var updated: NoteKeyring
+        var added = 0
+        var backup: URL?
+        if let existing {
+            updated = existing
+            for item in recovered where !updated.entries.contains(where: { $0.id == item.id }) {
+                updated.add(id: item.id, key: item.key, recovery: recovery, recoveryWrap: item.wrap)
+                added += 1
             }
-        }
-        guard !recovered.isEmpty else {
-            if wraps.keys.contains(where: { !hasKey($0) }) { throw NoteLockError.wrongRecoveryKey }
-            return 0
-        }
-        var keyring: NoteKeyring
-        let isNew = vault == nil
-        if isNew {
-            guard vaultError == nil else { throw NoteLockError.damaged }
-            keyring = NoteKeyring(primaryID: Data(), entries: [])
+            if added > 0 {
+                try save(updated, newDeviceKey: false)
+            }
         } else {
-            keyring = try await authenticatedKeyring(reason: "add your recovery key")
+            // No vault, or one this Mac can't open: start a new one from what the recovery key opens.
+            if vault != nil || vaultError != nil {
+                backup = try backUpVault()
+            }
+            updated = NoteKeyring(primaryID: Data(), entries: [])
+            for item in recovered {
+                updated.add(id: item.id, key: item.key, recovery: recovery, recoveryWrap: item.wrap)
+            }
+            if let primary = vault?.primaryKeyID, updated.entries.contains(where: { $0.id == primary }) {
+                updated.primaryID = primary
+            }
+            try save(updated, newDeviceKey: true)
+            vaultError = nil
+            added = recovered.count
         }
-        for item in recovered {
-            keyring.add(id: item.id, key: item.key, recovery: recovery, recoveryWrap: item.wrap)
-        }
-        try save(keyring, newDeviceKey: isNew)
-        open(keyring)
-        return recovered.count
+        open(updated)
+        let known = Set(updated.entries.map(\.id))
+        return RecoveryImport(added: added, replacedVaultBackup: backup, stillUnknown: wraps.keys.filter { !known.contains($0) }.count)
     }
 
     // MARK: Idle and sleep
@@ -677,8 +753,34 @@ final class NoteLockSession {
     private func authenticatedKeyring(reason: String) async throws -> NoteKeyring {
         guard let vault else { throw vaultError == nil ? NoteLockError.noVault : NoteLockError.damaged }
         try await provider.authenticate(reason: reason)
-        let deviceKey = try provider.key(from: vault.deviceKey)
-        return try vault.open(with: deviceKey)
+        return try openVault(vault)
+    }
+
+    /// After `authenticate`. Fails with `.deviceKeyUnusable` when the device key isn't this
+    /// Mac's (vault restored from another Mac) or the keyring doesn't open with it.
+    private func openVault(_ vault: NoteVaultFile) throws -> NoteKeyring {
+        do {
+            return try vault.open(with: provider.key(from: vault.deviceKey))
+        } catch NoteLockError.locked {
+            throw NoteLockError.locked
+        } catch {
+            throw NoteLockError.deviceKeyUnusable
+        }
+    }
+
+    /// Copies vault.json to `vault-unusable-<date>.json` before it is replaced.
+    private func backUpVault() throws -> URL? {
+        guard FileManager.default.fileExists(atPath: vaultURL.path) else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd-HH-mm-ss"
+        let directory = vaultURL.deletingLastPathComponent()
+        var backup = directory.appendingPathComponent("vault-unusable-\(formatter.string(from: Date())).json")
+        if FileManager.default.fileExists(atPath: backup.path) {
+            backup = directory.appendingPathComponent("vault-unusable-\(UUID().uuidString).json")
+        }
+        try FileManager.default.copyItem(at: vaultURL, to: backup)
+        return backup
     }
 
     private func save(_ keyring: NoteKeyring, newDeviceKey: Bool) throws {
@@ -699,6 +801,57 @@ final class NoteLockSession {
 }
 
 // MARK: - Locking an entry's files
+
+/// The file writes and deletes of locking, unlocking and changing the recovery key, so tests
+/// can make them fail. The app uses `StandardNoteLockFileOperations`.
+protocol NoteLockFileOperations: Sendable {
+    /// Writes atomically.
+    func write(_ data: Data, to url: URL) throws
+    func removeItem(at url: URL) throws
+    /// Atomically replaces `url` with `staged` (a rename in the same folder).
+    func replaceItem(at url: URL, withItemAt staged: URL) throws
+}
+
+struct StandardNoteLockFileOperations: NoteLockFileOperations {
+    func write(_ data: Data, to url: URL) throws {
+        try data.write(to: url, options: .atomic)
+    }
+
+    func removeItem(at url: URL) throws {
+        try FileManager.default.removeItem(at: url)
+    }
+
+    func replaceItem(at url: URL, withItemAt staged: URL) throws {
+        guard rename(staged.path, url.path) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+}
+
+/// What `EntryVersionStore.reconcileLeftoverPlainFiles` did.
+struct LeftoverPlainFiles: Equatable {
+    /// A newer plain top-level file became the current version.
+    var restoredNewerText = false
+    /// The version the replaced current text was sealed as (nil if it was empty).
+    var sealedVersion: String?
+    /// Plain files with no encrypted copy that were encrypted.
+    var encrypted: [URL] = []
+    /// Plain files that differ from their encrypted copy, left alone.
+    var kept: [URL] = []
+}
+
+/// Locked files rewritten as hidden copies, not moved into place yet (`stageReseal`).
+struct StagedReseal {
+    struct File {
+        let url: URL
+        let staged: URL
+        let entryFilename: String
+    }
+
+    var files: [File] = []
+    /// Locked entries with a file that can't be rewritten (no key on this Mac, unreadable).
+    var skipped: [String] = []
+}
 
 extension EntryVersionStore {
     /// Logical (`.md`) names of every locked entry in the folder.
@@ -761,18 +914,18 @@ extension EntryVersionStore {
             for source in sources {
                 let plain = try Data(contentsOf: source)
                 let target = lockedURL(for: source, entryFilename: entryFilename)
-                try cipher.seal(plain, keyID: primary.id).write(to: target, options: .atomic)
+                try lockFileOperations.write(cipher.seal(plain, keyID: primary.id), to: target)
                 written.append(target)
                 guard try cipher.open(Data(contentsOf: target)) == plain else { throw NoteLockError.verificationFailed }
             }
         } catch {
-            for url in written { try? FileManager.default.removeItem(at: url) }
+            for url in written { try? lockFileOperations.removeItem(at: url) }
             throw error
         }
         var notRemoved: [URL] = []
         for source in sources {
             do {
-                try FileManager.default.removeItem(at: source)
+                try lockFileOperations.removeItem(at: source)
             } catch {
                 notRemoved.append(source)
             }
@@ -780,60 +933,173 @@ extension EntryVersionStore {
         return notRemoved
     }
 
-    /// Turns a locked entry back into plain files (decrypted, written and checked first; the
-    /// encrypted files are removed last, the top-level one first).
-    func unlock(entryFilename: String) throws {
+    /// Turns a locked entry back into plain files. Every file is decrypted, written and checked
+    /// first; then the top-level `.fwlock` is removed. That one deletion is what makes the entry
+    /// plain: before it, readers use the encrypted files (all still there); after it, the plain
+    /// ones (all already written). If anything fails up to and including it, the plain copies
+    /// written so far are removed and the entry stays locked. The other encrypted files are
+    /// removed last; any that can't be are returned (stale copies nothing reads any more).
+    @discardableResult
+    func unlock(entryFilename: String) throws -> [URL] {
         guard let cipher else { throw NoteLockError.locked }
         guard isLocked(entryFilename) else { throw NoteLockError.notLocked }
-        let sources = nestedLockedFiles(of: entryFilename) + [lockedEntryFileURL(for: entryFilename)]
+        // Edits left in plain files by an earlier, interrupted unlock come back first.
+        try reconcileLeftoverPlainFiles(of: entryFilename)
+        let top = lockedEntryFileURL(for: entryFilename)
+        let sources = nestedLockedFiles(of: entryFilename) + [top]
         var written: [URL] = []
         do {
             for source in sources {
                 let plain = try cipher.open(Data(contentsOf: source))
                 let target = plainURL(forLocked: source, entryFilename: entryFilename)
-                try plain.write(to: target, options: .atomic)
+                // Never overwrite a plain file that holds something else.
+                if FileManager.default.fileExists(atPath: target.path), (try? Data(contentsOf: target)) != plain {
+                    throw NoteLockError.plainCopyConflict(target.lastPathComponent)
+                }
+                try lockFileOperations.write(plain, to: target)
                 written.append(target)
                 guard try Data(contentsOf: target) == plain else { throw NoteLockError.verificationFailed }
             }
+            try lockFileOperations.removeItem(at: top)
         } catch {
-            for url in written { try? FileManager.default.removeItem(at: url) }
-            throw error
-        }
-        for source in sources.reversed() {
-            try? FileManager.default.removeItem(at: source)
-        }
-    }
-
-    /// Plain copies left next to a locked entry's files by an interrupted lock or unlock.
-    /// Removed only when they match the decrypted content.
-    func removeLeftoverPlainFiles(of entryFilename: String) {
-        guard let cipher, isLocked(entryFilename) else { return }
-        for locked in nestedLockedFiles(of: entryFilename) + [lockedEntryFileURL(for: entryFilename)] {
-            let plainURL = plainURL(forLocked: locked, entryFilename: entryFilename)
-            guard FileManager.default.fileExists(atPath: plainURL.path),
-                  let plain = try? Data(contentsOf: plainURL),
-                  let decrypted = try? cipher.open(Data(contentsOf: locked)),
-                  plain == decrypted else { continue }
-            try? FileManager.default.removeItem(at: plainURL)
-        }
-    }
-
-    /// Rewrites every locked file of the folder sealed with the current cipher, so their
-    /// headers carry the current recovery wrap. Returns how many files were rewritten.
-    @discardableResult
-    func resealLockedFiles() throws -> Int {
-        guard let cipher else { throw NoteLockError.locked }
-        var count = 0
-        for filename in lockedEntryFilenames() {
-            for url in nestedLockedFiles(of: filename) + [lockedEntryFileURL(for: filename)] {
-                let data = try Data(contentsOf: url)
-                let keyID = try LockedFileFormat.header(of: data).keyID
-                guard cipher.keys[keyID] != nil else { continue }
-                try cipher.seal(cipher.open(data), keyID: keyID).write(to: url, options: .atomic)
-                count += 1
+            // If the top-level file is gone after all, the entry is plain: keep the plain files.
+            if FileManager.default.fileExists(atPath: top.path) {
+                for url in written { try? lockFileOperations.removeItem(at: url) }
+                throw error
             }
         }
-        return count
+        var notRemoved: [URL] = []
+        for source in sources.dropLast() {
+            do {
+                try lockFileOperations.removeItem(at: source)
+            } catch {
+                notRemoved.append(source)
+            }
+        }
+        return notRemoved
+    }
+
+    /// Sorts out plain files next to a locked entry's encrypted ones, left by an interrupted lock
+    /// or unlock:
+    /// • identical to the decrypted content → deleted;
+    /// • the top-level `.md` newer than the `.fwlock` and different (edits saved while an
+    ///   unlock was half done) → its text becomes the current version, encrypted, and the text it
+    ///   replaces is sealed as a version first, so nothing is lost; then the plain file goes;
+    /// • a plain file in `Entries/<base>/` with no encrypted copy → encrypted (the entry is
+    ///   locked, so readers only look for the `.fwlock`);
+    /// • anything else is left alone and listed in `kept`.
+    @discardableResult
+    func reconcileLeftoverPlainFiles(of entryFilename: String) throws -> LeftoverPlainFiles {
+        guard let cipher, isLocked(entryFilename) else { return LeftoverPlainFiles() }
+        var result = LeftoverPlainFiles()
+        let lockedTop = lockedEntryFileURL(for: entryFilename)
+        let plainTop = entryFileURL(for: entryFilename)
+        if let plain = try? Data(contentsOf: plainTop) {
+            let decrypted = try cipher.open(Data(contentsOf: lockedTop))
+            if plain == decrypted {
+                try? lockFileOperations.removeItem(at: plainTop)
+            } else if let newerText = String(data: plain, encoding: .utf8),
+                      Self.modificationDate(plainTop) > Self.modificationDate(lockedTop) {
+                if !(String(data: decrypted, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let manifest = try sealCurrent(entryFilename: entryFilename)
+                    result.sealedVersion = manifest.versions.dropLast().last?.id
+                }
+                try saveCurrentText(newerText, for: entryFilename)
+                guard try currentText(for: entryFilename) == newerText else { throw NoteLockError.verificationFailed }
+                try? lockFileOperations.removeItem(at: plainTop)
+                result.restoredNewerText = true
+            } else {
+                result.kept.append(plainTop)
+            }
+        }
+        for locked in nestedLockedFiles(of: entryFilename) {
+            let plainURL = plainURL(forLocked: locked, entryFilename: entryFilename)
+            guard let plain = try? Data(contentsOf: plainURL) else { continue }
+            if let decrypted = try? cipher.open(Data(contentsOf: locked)), decrypted == plain {
+                try? lockFileOperations.removeItem(at: plainURL)
+            } else {
+                result.kept.append(plainURL)
+            }
+        }
+        let keyID = try LockedFileFormat.header(ofFileAt: lockedTop).keyID
+        for orphan in plainFiles(of: entryFilename) where !FileManager.default.fileExists(atPath: lockedURL(for: orphan, entryFilename: entryFilename).path) {
+            let plain = try Data(contentsOf: orphan)
+            let target = lockedURL(for: orphan, entryFilename: entryFilename)
+            try lockFileOperations.write(cipher.seal(plain, keyID: keyID), to: target)
+            guard try cipher.open(Data(contentsOf: target)) == plain else {
+                try? lockFileOperations.removeItem(at: target)
+                throw NoteLockError.verificationFailed
+            }
+            try? lockFileOperations.removeItem(at: orphan)
+            result.encrypted.append(orphan)
+        }
+        return result
+    }
+
+    private static func modificationDate(_ url: URL) -> Date {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+    }
+
+    /// Whether a plain top-level `.md` newer than the `.fwlock` sits next to a locked entry
+    /// (edits from an interrupted unlock; `reconcileLeftoverPlainFiles` brings them back).
+    func hasNewerPlainCopy(_ entryFilename: String) -> Bool {
+        let plain = entryFileURL(for: entryFilename)
+        guard FileManager.default.fileExists(atPath: plain.path) else { return false }
+        return Self.modificationDate(plain) > Self.modificationDate(lockedEntryFileURL(for: entryFilename))
+    }
+
+    /// Writes every locked file of the folder that doesn't carry the current recovery wrap of
+    /// its key, resealed with the current cipher, to a hidden copy next to it, and checks each
+    /// copy decrypts to the same content. Nothing is replaced yet: any write or check failure
+    /// removes the copies and throws. Files this cipher can't open are listed in `skipped`.
+    func stageReseal() throws -> StagedReseal {
+        guard let cipher else { throw NoteLockError.locked }
+        var staged = StagedReseal()
+        do {
+            for filename in lockedEntryFilenames() {
+                for url in nestedLockedFiles(of: filename) + [lockedEntryFileURL(for: filename)] {
+                    guard let data = try? Data(contentsOf: url),
+                          let header = try? LockedFileFormat.header(of: data),
+                          let key = cipher.keys[header.keyID],
+                          let plain = try? cipher.open(data) else {
+                        if !staged.skipped.contains(filename) { staged.skipped.append(filename) }
+                        continue
+                    }
+                    guard header.recoveryWrap != key.recoveryWrap else { continue }
+                    let copy = url.deletingLastPathComponent().appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).rekey")
+                    try lockFileOperations.write(cipher.seal(plain, keyID: header.keyID), to: copy)
+                    staged.files.append(.init(url: url, staged: copy, entryFilename: filename))
+                    let check = try Data(contentsOf: copy)
+                    guard try LockedFileFormat.header(of: check).recoveryWrap == key.recoveryWrap,
+                          try cipher.open(check) == plain else { throw NoteLockError.verificationFailed }
+                }
+            }
+        } catch {
+            discardReseal(staged)
+            throw error
+        }
+        return staged
+    }
+
+    func discardReseal(_ staged: StagedReseal) {
+        for file in staged.files { try? lockFileOperations.removeItem(at: file.staged) }
+    }
+
+    /// Moves the staged copies over the locked files (one rename each). Returns what couldn't be
+    /// replaced: those files keep their old header, i.e. the old recovery key.
+    func commitReseal(_ staged: StagedReseal) -> (files: Int, entries: [String]) {
+        var failed = 0
+        var entries: [String] = []
+        for file in staged.files {
+            do {
+                try lockFileOperations.replaceItem(at: file.url, withItemAt: file.staged)
+            } catch {
+                try? lockFileOperations.removeItem(at: file.staged)
+                failed += 1
+                if !entries.contains(file.entryFilename) { entries.append(file.entryFilename) }
+            }
+        }
+        return (failed, entries)
     }
 
     private func plainURL(forLocked url: URL, entryFilename: String) -> URL {

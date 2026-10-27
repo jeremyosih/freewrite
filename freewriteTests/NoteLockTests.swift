@@ -210,10 +210,12 @@ struct NoteLockSessionTests {
         try "secret".write(to: store.entryFileURL(for: entry), atomically: true, encoding: .utf8)
         try store.lock(entryFilename: entry)
 
-        let newRecovery = try await session.replaceRecoveryKey()
+        let rotation = try await session.replaceRecoveryKey { store }
+        let newRecovery = rotation.recoveryKey
         #expect(newRecovery != oldRecovery)
-        let resealed = EntryVersionStore(root: store.root, cipher: session.cipher)
-        #expect(try resealed.resealLockedFiles() == 1)
+        #expect(rotation.updatedFiles == 1)
+        #expect(rotation.notUpdated.isEmpty)
+        #expect(try await session.recoveryKey() == newRecovery)
 
         let header = try LockedFileFormat.header(ofFileAt: store.lockedEntryFileURL(for: entry))
         #expect(throws: NoteLockError.wrongRecoveryKey) { try oldRecovery.unwrap(header.recoveryWrap, keyID: header.keyID) }
@@ -244,8 +246,8 @@ struct NoteLockSessionTests {
         }
 
         await #expect(throws: NoteLockError.wrongRecoveryKey) { try await macB.importKeys(with: .generate(), from: wraps) }
-        #expect(try await macB.importKeys(with: recovery, from: wraps) == 1)
-        #expect(try await macB.importKeys(with: recovery, from: wraps) == 0)
+        #expect(try await macB.importKeys(with: recovery, from: wraps).added == 1)
+        #expect(try await macB.importKeys(with: recovery, from: wraps).added == 0)
         #expect(try EntryVersionStore(root: folder, cipher: macB.cipher).currentText(for: entry) == "from Mac A")
 
         // After a relaunch, Mac B opens it with its own device key.
@@ -255,7 +257,8 @@ struct NoteLockSessionTests {
 
         // A brand-new Mac without a vault gets one from the recovery key alone.
         let macC = try makeSession()
-        #expect(try await macC.importKeys(with: recovery, from: wraps) == 1)
+        let imported = try await macC.importKeys(with: recovery, from: wraps)
+        #expect(imported == RecoveryImport(added: 1, replacedVaultBackup: nil, stillUnknown: 0))
         #expect(macC.hasVault)
         #expect(try EntryVersionStore(root: folder, cipher: macC.cipher).currentText(for: entry) == "from Mac A")
     }
@@ -400,7 +403,9 @@ struct LockedEntryStoreTests {
         try "second draft".write(to: store.entryFileURL(for: entry), atomically: true, encoding: .utf8)
         let edited = store.entryDirectory(for: entry).appendingPathComponent("versions/v1.md")
         try "edited elsewhere".write(to: edited, atomically: true, encoding: .utf8)
-        store.removeLeftoverPlainFiles(of: entry)
+        let result = try store.reconcileLeftoverPlainFiles(of: entry)
+        #expect(result.kept.map(\.lastPathComponent) == ["v1.md"])
+        #expect(!result.restoredNewerText)
         #expect(!fileManager.fileExists(atPath: store.entryFileURL(for: entry).path))
         #expect(fileManager.fileExists(atPath: edited.path))
     }

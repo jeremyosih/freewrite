@@ -98,6 +98,11 @@ struct PrivacySettingsView: View {
             }
         }
         .formStyle(.grouped)
+        // The recovery key is never left on screen once locked notes close (idle, sleep, screen
+        // lock, Lock Now), the pane is left or the Settings window closes.
+        .onChange(of: noteLock.lockCount) { hideRecoveryKey() }
+        .onDisappear { hideRecoveryKey() }
+        .background(WindowCloseObserver { hideRecoveryKey() })
         .sheet(item: $shownKey) { shown in
             RecoveryKeySheet(recoveryKey: shown.key, mode: shown.mode) { _ in shownKey = nil }
         }
@@ -116,18 +121,34 @@ struct PrivacySettingsView: View {
         }
     }
 
+    private func hideRecoveryKey() {
+        shownKey = nil
+    }
+
     private func replaceRecoveryKey() {
+        guard !storage.isTransferring else {
+            message = NoteLockError.busy.localizedDescription
+            return
+        }
         let alert = NSAlert()
         alert.messageText = "Create a new recovery key?"
-        alert.informativeText = "Your locked notes in this folder are rewritten so only the new key opens them. Older copies (backups, other folders) still open with the old key."
+        alert.informativeText = "Your locked notes in this folder, including any you unlocked with another recovery key, are rewritten so only the new key opens them. Older copies (backups, other folders) still open with the old key."
         alert.addButton(withTitle: "Create New Key")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         run {
-            let key = try await noteLock.replaceRecoveryKey()
-            let count = try storage.versionStore.resealLockedFiles()
-            message = "New recovery key created; \(count) locked file(s) updated."
-            shownKey = ShownRecoveryKey(key: key, mode: .replaced)
+            let rotation = try await noteLock.replaceRecoveryKey {
+                guard !storage.isTransferring else { throw NoteLockError.busy }
+                return storage.versionStore
+            }
+            // From here the new key is the recovery key: always show it.
+            if rotation.notUpdated.isEmpty {
+                message = "New recovery key created; \(rotation.updatedFiles) locked file(s) updated."
+            } else {
+                let notes = rotation.notUpdated.map(Self.noteName).joined(separator: ", ")
+                message = "New recovery key created, but \(rotation.notUpdated.count) locked note(s) couldn't be updated (\(notes)). Until they are, they still open only with your previous recovery key on other Macs: keep it, or create a new key again."
+            }
+            shownKey = ShownRecoveryKey(key: rotation.recoveryKey, mode: .replaced)
         }
     }
 
@@ -138,11 +159,25 @@ struct PrivacySettingsView: View {
                 message = "There are no locked notes in this folder."
                 return
             }
-            let added = try await noteLock.importKeys(with: key, from: wraps)
-            message = added == 0
-                ? "This Mac can already open every locked note in this folder."
-                : "Done. This Mac now opens those locked notes with its own Touch ID."
+            let result = try await noteLock.importKeys(with: key, from: wraps)
+            var parts: [String] = []
+            if let backup = result.replacedVaultBackup {
+                parts.append("This Mac's key for locked notes couldn't be used, so Freewrite made a new one from your recovery key (the old one was kept as \(backup.lastPathComponent)).")
+            }
+            parts.append(result.added == 0
+                ? "This Mac can already open the locked notes this recovery key is for."
+                : "Done. This Mac now opens those locked notes with its own Touch ID.")
+            if result.stillUnknown > 0 {
+                parts.append("Some locked notes in this folder need a different recovery key.")
+            }
+            message = parts.joined(separator: " ")
         }
+    }
+
+    /// "Feb 20, 2026" for a locked note's logical filename.
+    private static func noteName(_ filename: String) -> String {
+        guard let date = StorageTransfer.parseEntryFilename(filename)?.timestamp else { return filename }
+        return date.formatted(date: .abbreviated, time: .shortened)
     }
 
     private func run(_ work: @escaping @MainActor () async throws -> Void) {
@@ -156,6 +191,37 @@ struct PrivacySettingsView: View {
                 // No message.
             } catch {
                 message = error.localizedDescription
+            }
+        }
+    }
+}
+
+/// Calls `onClose` when the window holding this view closes (e.g. the Settings window).
+private struct WindowCloseObserver: NSViewRepresentable {
+    let onClose: () -> Void
+
+    func makeNSView(context: Context) -> ObserverView {
+        let view = ObserverView()
+        view.onClose = onClose
+        return view
+    }
+
+    func updateNSView(_ view: ObserverView, context: Context) {
+        view.onClose = onClose
+    }
+
+    final class ObserverView: NSView {
+        var onClose: (() -> Void)?
+        private var observer: NSObjectProtocol?
+
+        /// Also called with no window when the view goes away, which removes the observer.
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            observer = nil
+            guard let window else { return }
+            observer = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.onClose?() }
             }
         }
     }

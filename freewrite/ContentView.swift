@@ -28,6 +28,9 @@ struct HumanEntry: Identifiable {
     var hasVoiceNote = false
     /// Encrypted on disk (`[UUID]-[date].fwlock`); `filename` stays the logical `.md` name.
     var isLocked = false
+    /// A locked entry with a newer plain `.md` next to it (edits from an interrupted unlock),
+    /// brought back into the note when it's opened.
+    var hasNewerPlainCopy = false
 
     static func createNew() -> HumanEntry {
         let id = UUID()
@@ -526,8 +529,10 @@ struct ContentView: View {
         
         do {
             let fileURLs = try fileManager.contentsOfDirectory(at: documentsDirectory, includingPropertiesForKeys: nil)
-            // A locked note is `[UUID]-[date].fwlock`; if an interrupted lock left the `.md` too,
-            // the locked copy wins and the plain one is cleaned up when the note is next opened.
+            // A locked note is `[UUID]-[date].fwlock`; if an interrupted lock or unlock left the
+            // `.md` too, the locked note is listed. When it's opened, an identical `.md` is deleted
+            // and a newer, different one becomes its current text (`reconcileLeftoverPlainFiles`),
+            // so edits in it are never hidden for good.
             let lockedFiles = fileURLs.filter { $0.pathExtension == LockedFileFormat.fileExtension }
             let lockedBases = Set(lockedFiles.map { $0.deletingPathExtension().lastPathComponent })
             let mdFiles = fileURLs.filter { $0.pathExtension == "md" && !lockedBases.contains($0.deletingPathExtension().lastPathComponent) }
@@ -535,6 +540,7 @@ struct ContentView: View {
 
             print("Found \(mdFiles.count) .md files")
             let manifests = versionStore.savedManifests()
+            let lockStore = versionStore
 
             // Process each file
             let entriesWithDates = mdFiles.compactMap { fileURL -> (entry: HumanEntry, date: Date, content: String)? in
@@ -565,7 +571,8 @@ struct ContentView: View {
                             videoFilename: nil,
                             versionCount: manifests[logicalFilename]?.versions.count ?? 1,
                             hasVoiceNote: manifests[logicalFilename]?.hasVoiceNote ?? false,
-                            isLocked: true
+                            isLocked: true,
+                            hasNewerPlainCopy: lockStore.hasNewerPlainCopy(logicalFilename)
                         ),
                         date: fileDate,
                         content: ""
@@ -1377,21 +1384,50 @@ struct ContentView: View {
             guard await ensureNotesOpen(reason: "unlock this note") else { return }
             guard let entry = entries.first(where: { $0.id == entry.id }), entry.isLocked else { return }
             if openLockedNoteId == entry.id {
-                saveEntry(entry: entry)
+                guard saveEntry(entry: entry) else {
+                    showStatus("Couldn't save this note, so it wasn't unlocked.", for: entry.id)
+                    return
+                }
             }
+            // The note only shows as unlocked once its files are plain: a failure leaves it locked.
+            let staleFiles: [URL]
             do {
-                try versionStore.unlock(entryFilename: entry.filename)
+                staleFiles = try versionStore.unlock(entryFilename: entry.filename)
             } catch {
                 showStatus("Couldn't unlock this note: \(error.localizedDescription)", for: entry.id)
                 return
             }
             guard let index = entries.firstIndex(where: { $0.id == entry.id }) else { return }
             entries[index].isLocked = false
+            entries[index].hasNewerPlainCopy = false
+            applyManifest(versionStore.manifest(for: entry.filename), toEntry: entry.id)
             updatePreviewText(for: entries[index])
             if selectedEntryId == entry.id {
                 loadEntry(entry: entries[index])
             }
-            showStatus("Note unlocked.", for: entry.id)
+            showStatus(staleFiles.isEmpty
+                       ? "Note unlocked."
+                       : "Note unlocked, but \(staleFiles.count) old encrypted file(s) couldn't be deleted.", for: entry.id)
+        }
+    }
+
+    /// Deals with plain files an interrupted lock or unlock left next to a locked note that's
+    /// being opened, and tells the user when that changed the note.
+    private func reconcileLeftoverPlainFiles(of entry: HumanEntry, in store: EntryVersionStore) {
+        do {
+            let result = try store.reconcileLeftoverPlainFiles(of: entry.filename)
+            if let index = entries.firstIndex(where: { $0.id == entry.id }) {
+                entries[index].hasNewerPlainCopy = false
+            }
+            if result.restoredNewerText {
+                applyManifest(store.manifest(for: entry.filename), toEntry: entry.id)
+                showStatus(result.sealedVersion.map { "Brought back edits saved while this note was being unlocked; the text they replaced is \($0)." }
+                           ?? "Brought back edits saved while this note was being unlocked.", for: entry.id)
+            } else if !result.kept.isEmpty {
+                showStatus("\(result.kept.count) plain file(s) next to this locked note differ from it and were left in place.", for: entry.id)
+            }
+        } catch {
+            showStatus("Couldn't tidy up this note's plain copies: \(error.localizedDescription)", for: entry.id)
         }
     }
 
@@ -1431,6 +1467,14 @@ struct ContentView: View {
             Text("This note is locked")
                 .font(.custom(selectedFont, size: fontSize))
                 .foregroundColor(colorScheme == .light ? Color(red: 0.20, green: 0.20, blue: 0.20) : Color(red: 0.9, green: 0.9, blue: 0.9))
+            if entry?.hasNewerPlainCopy == true {
+                Text("Changes saved to this note while it was being unlocked are kept and come back when you open it.")
+                    .font(.system(size: 13))
+                    .foregroundColor(textColor)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+                    .accessibilityIdentifier("lockedNoteNewerPlainCopy")
+            }
             if lockedElsewhere {
                 Text("It was locked on another Mac. Unlock it once with your recovery key in Settings › Privacy.")
                     .font(.system(size: 13))
@@ -2790,8 +2834,8 @@ struct ContentView: View {
                     return
                 }
                 do {
+                    reconcileLeftoverPlainFiles(of: entry, in: store)
                     let rawText = try store.currentText(for: entry.filename)
-                    store.removeLeftoverPlainFiles(of: entry.filename)
                     let loaded = String(rawText.drop(while: { $0 == "\n" }))
                     lockedNoteSavedText = loaded
                     openLockedNoteId = entry.id
