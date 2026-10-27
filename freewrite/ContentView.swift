@@ -23,6 +23,9 @@ struct HumanEntry: Identifiable {
     var previewText: String
     var entryType: EntryType
     var videoFilename: String?
+    /// Number of versions (1 unless the entry has an `Entries/` manifest).
+    var versionCount = 1
+    var hasVoiceNote = false
 
     static func createNew() -> HumanEntry {
         let id = UUID()
@@ -146,6 +149,22 @@ struct ContentView: View {
     @State private var showingVideoPermissionPopover = false
     @State private var videoPermissionPopoverItems: [VideoPermissionPopoverItem] = []
     @State private var videoPermissionPopoverFallbackMessage: String? = nil
+    /// Saved manifest of the selected text entry; nil while it has a single version.
+    @State private var entryManifest: EntryManifest? = nil
+    /// A sealed version shown read-only in place of the current text (`text` is left alone).
+    @State private var viewedVersion: EntryVersion? = nil
+    @State private var viewedVersionText = ""
+    @State private var showingVersionMenu = false
+    @State private var isHoveringVersion = false
+    @State private var isHoveringBackToCurrent = false
+    @State private var isHoveringPlayVoiceNote = false
+    @State private var voiceRecorder = VoiceNoteRecorder()
+    @State private var voicePlayer = VoiceNotePlayer()
+    @State private var isRequestingMicrophone = false
+    @State private var isHoveringVoiceNoteButton = false
+    @State private var isHoveringStopVoiceNote = false
+    @State private var isHoveringDiscardVoiceNote = false
+    @State private var showingMicrophonePermissionPopover = false
     let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     let entryHeight: CGFloat = 40
     
@@ -208,6 +227,11 @@ struct ContentView: View {
 
     private func getVideosDirectory() -> URL {
         storage.videosURL
+    }
+
+    /// Versions and voice notes; re-read after any `await` since the folder can change.
+    private var versionStore: EntryVersionStore {
+        storage.versionStore
     }
 
     private func getVideoEntryDirectory(for videoFilename: String) -> URL {
@@ -502,6 +526,7 @@ struct ContentView: View {
             let mdFiles = fileURLs.filter { $0.pathExtension == "md" }
 
             print("Found \(mdFiles.count) .md files")
+            let manifests = versionStore.savedManifests()
 
             // Process each file
             let entriesWithDates = mdFiles.compactMap { fileURL -> (entry: HumanEntry, date: Date, content: String)? in
@@ -533,6 +558,7 @@ struct ContentView: View {
                     dateFormatter.dateFormat = "MMM d"
                     let displayDate = dateFormatter.string(from: fileDate)
 
+                    let manifest = hasVideo ? nil : manifests[filename]
                     return (
                         entry: HumanEntry(
                             id: uuid,
@@ -540,7 +566,9 @@ struct ContentView: View {
                             filename: filename,
                             previewText: hasVideo ? videoPreviewText(for: videoFilename) : truncated,
                             entryType: hasVideo ? .video : .text,
-                            videoFilename: hasVideo ? videoFilename : nil
+                            videoFilename: hasVideo ? videoFilename : nil,
+                            versionCount: manifest?.versions.count ?? 1,
+                            hasVoiceNote: manifest?.hasVoiceNote ?? false
                         ),
                         date: fileDate,
                         content: content  // Store the full content to check for welcome message
@@ -622,9 +650,17 @@ struct ContentView: View {
         }
     }
     
-    /// Saves the current text entry, then selects and loads another one.
-    private func selectEntry(id: UUID) {
-        guard selectedEntryId != id else { return }
+    /// Saves the current text entry, then selects and loads another one (at a sealed
+    /// version when `version` is given; otherwise at its current version).
+    private func selectEntry(id: UUID, version: String? = nil) {
+        guard selectedEntryId != id else {
+            if let version {
+                showVersion(version)
+            } else {
+                showCurrentVersion()
+            }
+            return
+        }
         if let currentId = selectedEntryId,
            let currentEntry = entries.first(where: { $0.id == currentId }),
            currentEntry.entryType == .text {
@@ -639,6 +675,9 @@ struct ContentView: View {
         selectedEntryId = targetEntry.id
         historyDebug("SELECT resolved target \(debugEntrySummary(targetEntry))")
         loadEntry(entry: targetEntry)
+        if let version {
+            showVersion(version)
+        }
     }
 
     private func openCommandPalette() {
@@ -653,15 +692,28 @@ struct ContentView: View {
             }
             return (entry, getDocumentsDirectory().appendingPathComponent(entry.filename))
         }
+        let store = versionStore
         Task {
             let documents = await Task.detached(priority: .userInitiated) {
-                sources.map { source in
-                    PaletteDocument(
+                sources.flatMap { source in
+                    let current = PaletteDocument(
                         id: source.entry.id,
                         date: source.entry.date,
                         isVideo: source.entry.entryType == .video,
                         body: source.url.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
                     )
+                    guard source.entry.entryType == .text, source.entry.versionCount > 1 else { return [current] }
+                    let filename = source.entry.filename
+                    let sealed = store.manifest(for: filename).sealedVersions.reversed().map { version in
+                        PaletteDocument(
+                            id: source.entry.id,
+                            date: source.entry.date,
+                            isVideo: false,
+                            body: (try? store.text(of: version.id, for: filename)) ?? "",
+                            version: version.id
+                        )
+                    }
+                    return [current] + sealed
                 }
             }.value
             if showingCommandPalette && paletteLoadID == loadID {
@@ -674,7 +726,7 @@ struct ContentView: View {
         showingCommandPalette = false
         switch item {
         case .entry(let document, _):
-            selectEntry(id: document.id)
+            selectEntry(id: document.id, version: document.version)
         case .command(let command):
             handle(command)
         case .settings:
@@ -687,12 +739,16 @@ struct ContentView: View {
         case .commandPalette:
             if showingCommandPalette {
                 showingCommandPalette = false
-            } else if !isPreparingVideoRecording && !showingVideoRecording {
-                // The video recorder owns the window while it's up.
+            } else if !isPreparingVideoRecording && !showingVideoRecording && !voiceRecorder.isRecording {
+                // The video recorder / voice-note bar owns the window while it's up.
                 openCommandPalette()
             }
         case .newEntry:
             createNewEntry()
+        case .newVersion:
+            createNewVersion()
+        case .recordVoiceNote:
+            toggleVoiceNoteRecording()
         case .toggleHistory:
             withAnimation(.easeInOut(duration: 0.2)) {
                 showingSidebar.toggle()
@@ -717,7 +773,7 @@ struct ContentView: View {
     }
 
     private func startVideoRecordingPreflight() {
-        guard !isPreparingVideoRecording, !showingVideoRecording else {
+        guard !isPreparingVideoRecording, !showingVideoRecording, !voiceRecorder.isRecording else {
             return
         }
 
@@ -864,6 +920,267 @@ struct ContentView: View {
         }
     }
 
+
+    // MARK: Versions
+
+    /// The selected entry when it's a text entry shown in the editor.
+    private var selectedTextEntry: HumanEntry? {
+        guard currentVideoURL == nil, let selectedEntryId,
+              let entry = entries.first(where: { $0.id == selectedEntryId }),
+              entry.entryType == .text else { return nil }
+        return entry
+    }
+
+    /// The version on screen: a sealed one being viewed, else the current one.
+    private var displayedVersion: EntryVersion? {
+        viewedVersion ?? entryManifest?.currentVersion
+    }
+
+    private func showVersion(_ versionId: String) {
+        guard let entry = selectedTextEntry, let manifest = entryManifest else { return }
+        guard versionId != manifest.current else {
+            showCurrentVersion()
+            return
+        }
+        guard let version = manifest.version(versionId) else { return }
+        do {
+            viewedVersionText = try versionStore.text(of: versionId, for: entry.filename)
+            viewedVersion = version
+            voicePlayer.stop()
+        } catch {
+            showStatus("Couldn't open \(versionId): \(error.localizedDescription)")
+        }
+    }
+
+    private func showCurrentVersion() {
+        guard viewedVersion != nil else { return }
+        viewedVersion = nil
+        viewedVersionText = ""
+        voicePlayer.stop()
+    }
+
+    /// Forgets the version state of the previously selected entry.
+    private func resetVersionState(for entry: HumanEntry?) {
+        viewedVersion = nil
+        viewedVersionText = ""
+        showingVersionMenu = false
+        voicePlayer.stop()
+        if let entry, entry.entryType == .text {
+            entryManifest = try? versionStore.savedManifest(for: entry.filename)
+        } else {
+            entryManifest = nil
+        }
+    }
+
+    /// Keeps the history row (badge, palette search) in step with the entry's manifest.
+    private func applyManifest(_ manifest: EntryManifest, toEntry id: UUID) {
+        if selectedEntryId == id {
+            entryManifest = manifest
+        }
+        if let index = entries.firstIndex(where: { $0.id == id }) {
+            entries[index].versionCount = manifest.versions.count
+            entries[index].hasVoiceNote = manifest.hasVoiceNote
+        }
+    }
+
+    /// Seals the current text as vN and continues on an empty page as vN+1.
+    private func createNewVersion() {
+        guard let entry = selectedTextEntry, !voiceRecorder.isRecording else { return }
+        showCurrentVersion()
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            NSSound.beep()
+            showStatus(EntryVersionStore.Failure.emptyVersion.localizedDescription)
+            return
+        }
+        // The store seals what's on disk, so make sure that's exactly what's on screen.
+        guard saveEntry(entry: entry) else {
+            showStatus("Couldn't save this entry, so no new version was started.")
+            return
+        }
+        do {
+            let manifest = try versionStore.sealCurrent(entryFilename: entry.filename)
+            applyManifest(manifest, toEntry: entry.id)
+            placeholderText = placeholderOptions.randomElement() ?? "Begin writing"
+            text = ""
+            updatePreviewText(for: entry)
+        } catch {
+            showStatus("Couldn't start a new version: \(error.localizedDescription)")
+        }
+    }
+
+    /// Bottom-bar status (transcribing, errors) for the selected entry.
+    private var transcriptionStatus: String? {
+        selectedEntryId.flatMap { transcriptionStatuses[$0] }
+    }
+
+    /// Shows a message in the bottom bar for a few seconds, on `entryId` (default: the selected entry).
+    private func showStatus(_ message: String, for entryId: UUID? = nil) {
+        guard let id = entryId ?? selectedEntryId else { return }
+        transcriptionStatuses[id] = message
+        Task {
+            try? await Task.sleep(for: .seconds(6))
+            if transcriptionStatuses[id] == message {
+                transcriptionStatuses[id] = nil
+            }
+        }
+    }
+
+    private func versionDateString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d HH:mm"
+        return formatter.string(from: date)
+    }
+
+    /// "voice note · Oct 27 09:12" for sealed versions, "current" (+ voice note) for the current one.
+    private func versionDetail(_ version: EntryVersion, in manifest: EntryManifest) -> String {
+        var parts: [String] = []
+        if version.audio != nil { parts.append("voice note") }
+        parts.append(version.id == manifest.current ? "current" : versionDateString(version.createdAt))
+        return parts.joined(separator: " · ")
+    }
+
+    // MARK: Voice notes
+
+    private func toggleVoiceNoteRecording() {
+        if voiceRecorder.isRecording {
+            stopVoiceNote()
+            return
+        }
+        guard !isRequestingMicrophone, !isPreparingVideoRecording, !showingVideoRecording else { return }
+        showingMicrophonePermissionPopover = false
+        isRequestingMicrophone = true
+        Task {
+            let granted = await VoiceNoteRecorder.requestMicrophoneAccess()
+            isRequestingMicrophone = false
+            guard granted else {
+                showingMicrophonePermissionPopover = true
+                return
+            }
+            do {
+                voicePlayer.stop()
+                try voiceRecorder.start()
+                withAnimation(.easeOut(duration: 0.2)) {
+                    bottomNavOpacity = 1.0
+                }
+            } catch {
+                showStatus("Couldn't record: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func stopVoiceNote() {
+        guard let audioURL = voiceRecorder.stop() else {
+            showStatus("Nothing was recorded.")
+            return
+        }
+        saveVoiceNote(from: audioURL)
+    }
+
+    /// Files a finished recording. An empty text entry (or one that already has versions) gets it
+    /// as its current version's voice note; otherwise it starts a new entry, like a video does.
+    private func saveVoiceNote(from audioURL: URL) {
+        let store = versionStore
+        var target: HumanEntry
+        var isNewEntry = false
+        if let selected = selectedTextEntry,
+           text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (entryManifest?.versions.count ?? 1) > 1 {
+            saveEntry(entry: selected)
+            target = selected
+        } else {
+            if let selected = selectedTextEntry {
+                saveEntry(entry: selected)
+            }
+            target = HumanEntry.createNew()
+            do {
+                try "".write(to: store.entryFileURL(for: target.filename), atomically: true, encoding: .utf8)
+            } catch {
+                showStatus("Couldn't save the voice note: \(error.localizedDescription)")
+                return
+            }
+            isNewEntry = true
+        }
+
+        let attachment: VoiceNoteAttachment
+        do {
+            attachment = try store.attachVoiceNote(from: audioURL, to: target.filename)
+        } catch {
+            if isNewEntry {
+                try? FileManager.default.removeItem(at: store.entryFileURL(for: target.filename))
+            }
+            showStatus("Couldn't save the voice note: \(error.localizedDescription)")
+            return
+        }
+
+        target.versionCount = attachment.manifest.versions.count
+        target.hasVoiceNote = true
+        if isNewEntry {
+            entries.insert(target, at: 0)
+            entries.sort { isEntryNewer($0, than: $1) }
+            selectedEntryId = target.id
+            currentVideoURL = nil
+            selectedVideoHasTranscript = false
+            didCopyTranscript = false
+            text = ""
+            placeholderText = placeholderOptions.randomElement() ?? "Begin writing"
+            resetVersionState(for: target)
+        } else {
+            showCurrentVersion()
+        }
+        applyManifest(attachment.manifest, toEntry: target.id)
+        transcribeVoiceNote(attachment, entryId: target.id, entryFilename: target.filename)
+    }
+
+    /// Transcribes with the engine from Settings, keeps the raw transcript next to the audio and
+    /// adds it to the version's text (if that version is still the current one).
+    private func transcribeVoiceNote(_ attachment: VoiceNoteAttachment, entryId: UUID, entryFilename: String) {
+        let engine = TranscriptionEngine.current
+        let progress = engine == .hex ? "Transcribing with Hex…" : "Transcribing…"
+        transcriptionStatuses[entryId] = progress
+        Task {
+            do {
+                let transcript = try await engine.transcribe(fileURL: attachment.audioURL)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                // Resolve paths now: the entries folder may have changed while transcribing.
+                let store = versionStore
+                try store.saveTranscript(transcript, forAudio: attachment.audioPath, entryFilename: entryFilename)
+                guard !transcript.isEmpty else {
+                    showStatus("No speech found in the voice note.", for: entryId)
+                    return
+                }
+                guard store.manifest(for: entryFilename).current == attachment.versionId else {
+                    showStatus("Transcript saved with \(attachment.versionId).", for: entryId)
+                    return
+                }
+                if selectedEntryId == entryId && currentVideoURL == nil {
+                    text = appending(transcript, to: text)  // autosaved like typing
+                } else {
+                    let url = store.entryFileURL(for: entryFilename)
+                    let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+                    try appending(transcript, to: existing).write(to: url, atomically: true, encoding: .utf8)
+                    if let entry = entries.first(where: { $0.id == entryId }) {
+                        updatePreviewText(for: entry)
+                    }
+                }
+                if transcriptionStatuses[entryId] == progress {
+                    transcriptionStatuses[entryId] = nil
+                }
+            } catch {
+                showStatus("\(engine == .hex ? "Hex" : "Transcription"): \(error.localizedDescription)", for: entryId)
+            }
+        }
+    }
+
+    private func appending(_ transcript: String, to existing: String) -> String {
+        guard !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return transcript }
+        let body = existing.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+        return body + "\n\n" + transcript
+    }
+
+    private func audioURL(for version: EntryVersion) -> URL? {
+        guard let entry = selectedTextEntry, let audio = version.audio else { return nil }
+        return versionStore.url(forRelativePath: audio, entryFilename: entry.filename)
+    }
+
     var timerButtonTitle: String {
         if !timerIsRunning && timeRemaining == 900 {
             return "15:00"
@@ -921,8 +1238,10 @@ struct ContentView: View {
                 } else {
                     // Show text editor for text entries
                     // Accessibility label/identifier ("Entry text" / "editor") live on the NSTextView.
+                    // A sealed version is shown read-only from its own text; `text` (the current
+                    // version, autosaved) is never touched while viewing it.
                     WritingEditor(
-                        text: $text,
+                        text: viewedVersion == nil ? $text : .constant(viewedVersionText),
                         font: WritingEditor.font(named: selectedFont, size: fontSize),
                         lineSpacing: lineHeight,
                         textColor: colorScheme == .light
@@ -930,7 +1249,8 @@ struct ContentView: View {
                             : NSColor(srgbRed: 0.9, green: 0.9, blue: 0.9, alpha: 1),
                         isDark: colorScheme == .dark,
                         focusKey: selectedEntryId,
-                        canTakeFocus: !showingCommandPalette
+                        canTakeFocus: !showingCommandPalette,
+                        isEditable: viewedVersion == nil
                     )
                     .background(Color(colorScheme == .light ? .white : .black))
                     .frame(maxWidth: 650)
@@ -963,7 +1283,7 @@ struct ContentView: View {
                     }
                     .overlay(
                         ZStack(alignment: .topLeading) {
-                            if text.isEmpty {
+                            if viewedVersion == nil && text.isEmpty {
                                 Text(placeholderText)
                                     .font(.custom(selectedFont, size: fontSize))
                                     .foregroundColor(colorScheme == .light ? .gray.opacity(0.5) : .gray.opacity(0.6))
@@ -973,11 +1293,17 @@ struct ContentView: View {
                         }, alignment: .topLeading
                     )
                 }
-                    
+
+                if let viewedVersion, !isViewingVideoEntry {
+                    versionBanner(for: viewedVersion, textColor: textColor, textHoverColor: textHoverColor)
+                }
                 
                 VStack {
                     Spacer()
                     HStack {
+                        if !isViewingVideoEntry {
+                            textEntryControls(textColor: textColor, textHoverColor: textHoverColor)
+                        }
                         if isViewingVideoEntry {
                             HStack(spacing: 8) {
                                 if let transcriptionStatus = selectedEntryId.flatMap({ transcriptionStatuses[$0] }) {
@@ -1156,6 +1482,11 @@ struct ContentView: View {
                                 .frame(minWidth: 300, idealWidth: 320, maxWidth: 360)
                                 .background(colorScheme == .light ? Color.white : Color.black)
                             }
+
+                            Text("•")
+                                .foregroundColor(.gray)
+
+                            voiceNoteButton(textColor: textColor, textHoverColor: textHoverColor)
 
                             Text("•")
                                 .foregroundColor(.gray)
@@ -1431,6 +1762,14 @@ struct ContentView: View {
                         .onHover { hovering in
                             isHoveringBottomNav = hovering
                         }
+                        // While a voice note records, the bar turns into its controls.
+                        .opacity(voiceRecorder.isRecording ? 0 : 1)
+                        .allowsHitTesting(!voiceRecorder.isRecording)
+                        .overlay(alignment: .trailing) {
+                            if voiceRecorder.isRecording {
+                                voiceNoteRecordingBar(textColor: textColor, textHoverColor: textHoverColor)
+                            }
+                        }
                     }
                     .padding()
                     .background(Color(colorScheme == .light ? .white : .black))
@@ -1441,7 +1780,7 @@ struct ContentView: View {
                             withAnimation(.easeOut(duration: 0.2)) {
                                 bottomNavOpacity = 1.0
                             }
-                        } else if timerIsRunning {
+                        } else if timerIsRunning && !voiceRecorder.isRecording {
                             withAnimation(.easeIn(duration: 1.0)) {
                                 bottomNavOpacity = 0.0
                             }
@@ -1525,12 +1864,16 @@ struct ContentView: View {
 
                                         VStack(alignment: .leading, spacing: 4) {
                                             HStack {
-                                                Text(entry.previewText)
+                                                Text(entry.previewText.isEmpty && entry.hasVoiceNote ? "Voice Note" : entry.previewText)
                                                     .font(.system(size: 13))
                                                     .lineLimit(1)
                                                     .foregroundColor(.primary)
 
                                                 Spacer()
+
+                                                if hoveredEntryId != entry.id {
+                                                    historyBadges(for: entry)
+                                                }
                                                 
                                                 // Export/Trash icons that appear on hover
                                                 if hoveredEntryId == entry.id {
@@ -1610,7 +1953,7 @@ struct ContentView: View {
                                     NSCursor.pop()  // Reset cursor when button appears
                                 }
                                 .help("Click to select this entry")  // Add tooltip
-                                .accessibilityLabel("\(entry.previewText.isEmpty ? "Empty entry" : entry.previewText), \(entry.date)")
+                                .accessibilityLabel("\(entry.previewText.isEmpty ? (entry.hasVoiceNote ? "Voice note" : "Empty entry") : entry.previewText), \(entry.date)\(entry.versionCount > 1 ? ", \(entry.versionCount) versions" : "")")
                                 .accessibilityAddTraits(selectedEntryId == entry.id ? .isSelected : [])
                                 .accessibilityIdentifier("historyRow-\(entry.id.uuidString)")
                                 
@@ -1672,6 +2015,7 @@ struct ContentView: View {
         .onChange(of: storage.rootURL) {
             // The entries folder changed in Settings; show what's in the new one.
             currentVideoURL = nil
+            resetVersionState(for: nil)
             loadExistingEntries()
         }
         .alert("Entries Folder Unavailable", isPresented: Binding(
@@ -1725,6 +2069,304 @@ struct ContentView: View {
         }
     }
     
+    // MARK: Version & voice note controls
+
+    private func hoverCursor(_ hovering: Bool) {
+        isHoveringBottomNav = hovering
+        if hovering {
+            NSCursor.pointingHand.push()
+        } else {
+            NSCursor.pop()
+        }
+    }
+
+    /// Bottom-left for text entries: version menu (once there's more than one version or a
+    /// voice note), the current version's voice note, and transient status.
+    @ViewBuilder
+    private func textEntryControls(textColor: Color, textHoverColor: Color) -> some View {
+        HStack(spacing: 8) {
+            if let manifest = entryManifest, manifest.isInteresting {
+                Button(action: {
+                    showingVersionMenu.toggle()
+                }) {
+                    HStack(spacing: 3) {
+                        Text(displayedVersion?.id ?? manifest.current)
+                            .font(.system(size: 13).monospacedDigit())
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 9))
+                    }
+                    .foregroundColor(isHoveringVersion ? textHoverColor : textColor)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Version \(displayedVersion?.n ?? 1) of \(manifest.versions.count)")
+                .accessibilityIdentifier("versionButton")
+                .help("Versions")
+                .onHover { hovering in
+                    isHoveringVersion = hovering
+                    hoverCursor(hovering)
+                }
+                .popover(isPresented: $showingVersionMenu, attachmentAnchor: .point(UnitPoint(x: 0.5, y: 0)), arrowEdge: .top) {
+                    versionMenu(manifest)
+                }
+
+                if viewedVersion == nil, let current = manifest.currentVersion, let url = audioURL(for: current) {
+                    Text("•")
+                        .foregroundColor(.gray)
+                    playVoiceNoteButton(url: url, textColor: textColor, textHoverColor: textHoverColor)
+                }
+            }
+            if let transcriptionStatus {
+                Text(transcriptionStatus)
+                    .font(.system(size: 13))
+                    .foregroundColor(textColor)
+                    .lineLimit(1)
+            }
+        }
+        .padding(8)
+        .onHover { hovering in
+            isHoveringBottomNav = hovering
+        }
+    }
+
+    private func versionMenu(_ manifest: EntryManifest) -> some View {
+        VStack(spacing: 0) {
+            ForEach(manifest.versions.reversed()) { version in
+                Button(action: {
+                    showingVersionMenu = false
+                    showVersion(version.id)
+                }) {
+                    HStack(spacing: 8) {
+                        Text(version.id)
+                            .font(.system(size: 13, weight: .medium).monospacedDigit())
+                        Text(versionDetail(version, in: manifest))
+                            .font(.system(size: 12))
+                            .opacity(0.6)
+                        Spacer(minLength: 12)
+                        if version.id == displayedVersion?.id {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(popoverTextColor)
+                .accessibilityIdentifier("versionRow-\(version.id)")
+                .onHover { hovering in
+                    if hovering {
+                        NSCursor.pointingHand.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+                }
+                Divider()
+            }
+            Button(action: {
+                showingVersionMenu = false
+                createNewVersion()
+            }) {
+                HStack {
+                    Text("New Version")
+                        .font(.system(size: 13))
+                    Spacer(minLength: 12)
+                    Text(ShortcutStore.shortcut(for: .newVersion, in: shortcutsJSON)?.displayString ?? "")
+                        .font(.system(size: 12))
+                        .opacity(0.6)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(popoverTextColor)
+            .accessibilityIdentifier("newVersionButton")
+            .onHover { hovering in
+                if hovering {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+        }
+        .frame(width: 250)
+        .background(popoverBackgroundColor)
+    }
+
+    /// Top of the editor while a sealed version is shown read-only.
+    private func versionBanner(for version: EntryVersion, textColor: Color, textHoverColor: Color) -> some View {
+        VStack {
+            HStack(spacing: 8) {
+                Text("Viewing \(version.id) · read-only")
+                    .foregroundColor(textColor)
+                if let url = audioURL(for: version) {
+                    Text("•")
+                        .foregroundColor(.gray)
+                    playVoiceNoteButton(url: url, textColor: textColor, textHoverColor: textHoverColor)
+                }
+                Text("•")
+                    .foregroundColor(.gray)
+                Button("Back to current") {
+                    showCurrentVersion()
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("backToCurrentVersionButton")
+                .foregroundColor(isHoveringBackToCurrent ? textHoverColor : textColor)
+                .onHover { hovering in
+                    isHoveringBackToCurrent = hovering
+                    if hovering {
+                        NSCursor.pointingHand.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+                }
+            }
+            .font(.system(size: 13))
+            .padding(.top, 12)
+            Spacer()
+        }
+    }
+
+    private func playVoiceNoteButton(url: URL, textColor: Color, textHoverColor: Color) -> some View {
+        let isPlaying = voicePlayer.url == url && voicePlayer.isPlaying
+        return Button(action: {
+            voicePlayer.toggle(url)
+        }) {
+            HStack(spacing: 4) {
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 10))
+                Text(isPlaying ? "Pause voice note" : "Play voice note")
+                    .font(.system(size: 13))
+            }
+            .foregroundColor(isHoveringPlayVoiceNote ? textHoverColor : textColor)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("playVoiceNoteButton")
+        .onHover { hovering in
+            isHoveringPlayVoiceNote = hovering
+            hoverCursor(hovering)
+        }
+    }
+
+    /// Microphone next to the video camera; records an audio-only voice note.
+    private func voiceNoteButton(textColor: Color, textHoverColor: Color) -> some View {
+        Button(action: {
+            toggleVoiceNoteRecording()
+        }) {
+            Group {
+                if isRequestingMicrophone {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(isHoveringVoiceNoteButton ? textHoverColor : textColor)
+                } else {
+                    Image(systemName: "mic.fill")
+                        .foregroundColor(isHoveringVoiceNoteButton ? textHoverColor : textColor)
+                }
+            }
+            .frame(width: 14, height: 14)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Record voice note")
+        .accessibilityIdentifier("recordVoiceNoteButton")
+        .onHover { hovering in
+            isHoveringVoiceNoteButton = hovering
+            hoverCursor(hovering)
+        }
+        .popover(
+            isPresented: $showingMicrophonePermissionPopover,
+            attachmentAnchor: .point(UnitPoint(x: 0.5, y: 0.0)),
+            arrowEdge: .top
+        ) {
+            Button(action: {
+                showingMicrophonePermissionPopover = false
+                openVideoPermissionSettings("Privacy_Microphone")
+            }) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Hey, we need microphone permission.")
+                        .font(.system(size: 14))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Open Microphone Settings")
+                        .font(.system(size: 12))
+                        .opacity(0.85)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(popoverTextColor)
+            .frame(minWidth: 300, idealWidth: 320, maxWidth: 360)
+            .background(colorScheme == .light ? Color.white : Color.black)
+        }
+    }
+
+    /// `● 3:42 ▁▃▅▂ Stop • Discard`, shown in place of the utility buttons while recording.
+    private func voiceNoteRecordingBar(textColor: Color, textHoverColor: Color) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Color.red)
+                .frame(width: 7, height: 7)
+            Text(voiceRecorder.elapsed.clockString)
+                .font(.system(size: 13).monospacedDigit())
+                .foregroundColor(textColor)
+                .accessibilityLabel("Recording, \(voiceRecorder.elapsed.clockString)")
+            LevelMeter(levels: voiceRecorder.levels, color: textColor)
+                .accessibilityHidden(true)
+            Text("•")
+                .foregroundColor(.gray)
+            Button("Stop") {
+                stopVoiceNote()
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Stop and save voice note")
+            .accessibilityIdentifier("stopVoiceNoteButton")
+            .foregroundColor(isHoveringStopVoiceNote ? textHoverColor : textColor)
+            .onHover { hovering in
+                isHoveringStopVoiceNote = hovering
+                hoverCursor(hovering)
+            }
+            Text("•")
+                .foregroundColor(.gray)
+            Button("Discard") {
+                voiceRecorder.discard()
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Discard voice note")
+            .accessibilityIdentifier("discardVoiceNoteButton")
+            .foregroundColor(isHoveringDiscardVoiceNote ? textHoverColor : textColor)
+            .onHover { hovering in
+                isHoveringDiscardVoiceNote = hovering
+                hoverCursor(hovering)
+            }
+        }
+        .padding(8)
+    }
+
+    @ViewBuilder
+    private func historyBadges(for entry: HumanEntry) -> some View {
+        HStack(spacing: 4) {
+            if entry.hasVoiceNote {
+                Image(systemName: "waveform")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+            if entry.versionCount > 1 {
+                Text("v\(entry.versionCount)")
+                    .font(.system(size: 10, weight: .medium).monospacedDigit())
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 3)
+                            .stroke(Color.secondary.opacity(0.4), lineWidth: 0.5)
+                    )
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
     private func backgroundColor(for entry: HumanEntry) -> Color {
         if entry.id == selectedEntryId {
             return Color.gray.opacity(0.1)  // More subtle selection highlight
@@ -1763,9 +2405,11 @@ struct ContentView: View {
         }
     }
     
-    private func saveEntry(entry: HumanEntry) {
+    /// Writes `text` (always the current version) to the entry's top-level file.
+    @discardableResult
+    private func saveEntry(entry: HumanEntry) -> Bool {
         guard entry.entryType == .text else {
-            return
+            return false
         }
 
         let documentsDirectory = getDocumentsDirectory()
@@ -1775,12 +2419,15 @@ struct ContentView: View {
             try text.write(to: fileURL, atomically: true, encoding: .utf8)
             print("Successfully saved entry: \(entry.filename)")
             updatePreviewText(for: entry)  // Update preview after saving
+            return true
         } catch {
             print("Error saving entry: \(error)")
+            return false
         }
     }
     
     private func loadEntry(entry: HumanEntry) {
+        resetVersionState(for: entry)
         if let videoFilename = resolvedVideoFilename(for: entry) {
             // Load video entry
             let videoURL = getVideoURL(for: videoFilename)
@@ -1825,6 +2472,7 @@ struct ContentView: View {
         currentVideoURL = nil
         selectedVideoHasTranscript = false
         didCopyTranscript = false
+        resetVersionState(for: nil)
         historyDebug("NEW ENTRY created \(debugEntrySummary(newEntry))")
         logEntriesOrder("createNewEntry")
 
@@ -1889,7 +2537,7 @@ struct ContentView: View {
            let transcript = loadTranscriptText(for: videoFilename) {
             return transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (viewedVersion == nil ? text : viewedVersionText).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func saveVideoEntry(from tempURL: URL, transcript: String?) {
@@ -1898,6 +2546,8 @@ struct ContentView: View {
             .flatMap { entry -> HumanEntry? in
                 guard entry.entryType == .text else { return nil }
                 guard text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                // An entry with versions or a voice note keeps them; the video gets its own entry.
+                guard entryManifest == nil else { return nil }
                 return entry
             }
 
@@ -1973,6 +2623,7 @@ struct ContentView: View {
                         return
                     }
                     self.selectedEntryId = insertedEntry.id
+                    self.resetVersionState(for: insertedEntry)
                     self.currentVideoURL = videoDestURL
                     self.text = ""
                     self.didCopyTranscript = false
@@ -2081,6 +2732,13 @@ struct ContentView: View {
             if let videoFilename = resolvedVideoFilename(for: entry) {
                 deleteVideoAssets(for: videoFilename)
                 print("Successfully deleted video assets: \(videoFilename)")
+            }
+
+            // Sealed versions and voice notes
+            do {
+                try versionStore.deleteEntryDirectory(for: entry.filename)
+            } catch {
+                print("Error deleting versions of \(entry.filename): \(error)")
             }
 
             // Remove the entry from the entries array
@@ -2307,4 +2965,22 @@ extension NSView {
 
 #Preview {
     ContentView()
+}
+
+/// Small bar meter of recent input levels.
+private struct LevelMeter: View {
+    let levels: [Float]
+    let color: Color
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 2) {
+            ForEach(Array(levels.enumerated()), id: \.offset) { _, level in
+                Capsule()
+                    .fill(color.opacity(0.7))
+                    .frame(width: 2, height: 2 + CGFloat(level) * 12)
+            }
+        }
+        .frame(height: 14)
+        .animation(.linear(duration: 0.08), value: levels)
+    }
 }

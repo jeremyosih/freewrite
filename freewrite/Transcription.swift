@@ -2,14 +2,16 @@
 //  Transcription.swift
 //  freewrite
 //
-//  Choice of speech-to-text engine for video entries:
-//  - Apple: on-device SFSpeechRecognizer, live while recording (CameraManager).
+//  Choice of speech-to-text engine for video entries and voice notes:
+//  - Apple: on-device. Videos are transcribed live while recording (CameraManager); voice notes
+//    are transcribed from the saved file (SpeechAnalyzer, falling back to SFSpeechRecognizer).
 //  - Hex: the local Hex dictation app (https://hex.kitlangton.com) through its desktop local API v2,
 //    run on the saved recording after it stops. Audio never leaves the Mac either way.
 //
 
 import Foundation
 import AVFoundation
+import Speech
 
 enum TranscriptionEngine: String, CaseIterable, Identifiable {
     case apple
@@ -26,6 +28,14 @@ enum TranscriptionEngine: String, CaseIterable, Identifiable {
 
     static var current: TranscriptionEngine {
         TranscriptionEngine(rawValue: UserDefaults.standard.string(forKey: SettingsKey.transcriptionEngine) ?? "") ?? .apple
+    }
+
+    /// Transcribes a saved audio (or movie) file with this engine.
+    func transcribe(fileURL: URL) async throws -> String {
+        switch self {
+        case .apple: return try await AppleFileTranscriber.transcribe(fileURL: fileURL)
+        case .hex: return try await HexTranscriber.transcribe(mediaURL: fileURL)
+        }
     }
 }
 
@@ -321,5 +331,118 @@ enum HexTranscriber {
             append(Int16(max(-1, min(1, sample)) * Float(Int16.max)))
         }
         return data
+    }
+}
+
+// MARK: - Transcribing a saved recording on-device
+
+/// Apple's on-device recognition over a whole file: the long-form `SpeechAnalyzer` +
+/// `SpeechTranscriber` when the locale is supported (installing its model if needed), otherwise
+/// `SFSpeechRecognizer` with on-device recognition where available.
+enum AppleFileTranscriber {
+    enum Failure: LocalizedError {
+        case notAuthorized
+        case unavailable
+
+        var errorDescription: String? {
+            switch self {
+            case .notAuthorized: return "Speech recognition isn't allowed. Turn it on in System Settings › Privacy & Security."
+            case .unavailable: return "Speech recognition isn't available for your language."
+            }
+        }
+    }
+
+    static func transcribe(fileURL: URL, locale: Locale = .current) async throws -> String {
+        guard await requestAuthorization() else { throw Failure.notAuthorized }
+        if SpeechTranscriber.isAvailable,
+           let supported = await SpeechTranscriber.supportedLocale(equivalentTo: locale) {
+            do {
+                return try await transcribeWithAnalyzer(fileURL: fileURL, locale: supported)
+            } catch {
+                print("SpeechAnalyzer failed, falling back to SFSpeechRecognizer: \(error)")
+            }
+        }
+        return try await transcribeWithRecognizer(fileURL: fileURL, locale: locale)
+    }
+
+    static func requestAuthorization() async -> Bool {
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .authorized: return true
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                SFSpeechRecognizer.requestAuthorization { status in
+                    continuation.resume(returning: status == .authorized)
+                }
+            }
+        default: return false
+        }
+    }
+
+    private static func transcribeWithAnalyzer(fileURL: URL, locale: Locale) async throws -> String {
+        let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            try await request.downloadAndInstall()
+        }
+        let collector = Task {
+            var pieces: [String] = []
+            for try await result in transcriber.results where result.isFinal {
+                pieces.append(String(result.text.characters))
+            }
+            return pieces
+        }
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        do {
+            let file = try AVAudioFile(forReading: fileURL)
+            if let end = try await analyzer.analyzeSequence(from: file) {
+                try await analyzer.finalizeAndFinish(through: end)
+            } else {
+                await analyzer.cancelAndFinishNow()
+            }
+        } catch {
+            await analyzer.cancelAndFinishNow()
+            collector.cancel()
+            throw error
+        }
+        return normalized(try await collector.value.joined())
+    }
+
+    private static func transcribeWithRecognizer(fileURL: URL, locale: Locale) async throws -> String {
+        guard let recognizer = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer(), recognizer.isAvailable else {
+            throw Failure.unavailable
+        }
+        let request = SFSpeechURLRecognitionRequest(url: fileURL)
+        request.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
+        request.shouldReportPartialResults = false
+        request.addsPunctuation = true
+
+        let once = ResumeOnce()
+        return try await withCheckedThrowingContinuation { continuation in
+            recognizer.recognitionTask(with: request) { result, error in
+                if let error {
+                    if once.claim() { continuation.resume(throwing: error) }
+                } else if let result, result.isFinal {
+                    if once.claim() { continuation.resume(returning: normalized(result.bestTranscription.formattedString)) }
+                }
+            }
+        }
+    }
+
+    /// Collapses runs of whitespace (results come as space-prefixed segments).
+    static func normalized(_ text: String) -> String {
+        text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Lets a callback that may fire several times resume a continuation once.
+    private final class ResumeOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var claimed = false
+
+        func claim() -> Bool {
+            lock.withLock {
+                defer { claimed = true }
+                return !claimed
+            }
+        }
     }
 }

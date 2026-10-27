@@ -40,9 +40,11 @@ enum WritingFont {
 enum AppCommand: String, CaseIterable, Identifiable {
     case commandPalette
     case newEntry
+    case newVersion
     case toggleHistory
     case toggleTimer
     case recordVideo
+    case recordVoiceNote
     case openChat
     case toggleBackspace
     case toggleTheme
@@ -55,9 +57,11 @@ enum AppCommand: String, CaseIterable, Identifiable {
         switch self {
         case .commandPalette: return "Search Entries & Actions"
         case .newEntry: return "New Entry"
+        case .newVersion: return "New Version"
         case .toggleHistory: return "Show/Hide History"
         case .toggleTimer: return "Start/Pause Timer"
         case .recordVideo: return "Record Video"
+        case .recordVoiceNote: return "Record Voice Note"
         case .openChat: return "Chat"
         case .toggleBackspace: return "Toggle Backspace"
         case .toggleTheme: return "Toggle Light/Dark"
@@ -70,9 +74,11 @@ enum AppCommand: String, CaseIterable, Identifiable {
         switch self {
         case .commandPalette: return KeyShortcut(key: "k", modifiers: [.command])
         case .newEntry: return KeyShortcut(key: "n", modifiers: [.command])
+        case .newVersion: return KeyShortcut(key: "n", modifiers: [.command, .shift])
         case .toggleHistory: return KeyShortcut(key: "h", modifiers: [.command, .shift])
         case .toggleTimer: return KeyShortcut(key: "t", modifiers: [.command])
         case .recordVideo: return KeyShortcut(key: "r", modifiers: [.command, .shift])
+        case .recordVoiceNote: return KeyShortcut(key: "v", modifiers: [.command, .shift])
         case .openChat: return KeyShortcut(key: "c", modifiers: [.command, .shift])
         case .toggleBackspace: return KeyShortcut(key: "b", modifiers: [.command, .shift])
         case .toggleTheme: return KeyShortcut(key: "l", modifiers: [.command, .shift])
@@ -224,6 +230,7 @@ struct FreewriteCommands: Commands {
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             button(for: .newEntry)
+            button(for: .newVersion)
             button(for: .commandPalette)
         }
         CommandMenu("Write") {
@@ -234,6 +241,7 @@ struct FreewriteCommands: Commands {
             button(for: .decreaseFontSize)
             Divider()
             button(for: .recordVideo)
+            button(for: .recordVoiceNote)
             button(for: .openChat)
         }
         CommandGroup(after: .sidebar) {

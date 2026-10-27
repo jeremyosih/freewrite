@@ -78,6 +78,8 @@ freewrite/
 │   ├── WritingEditor.swift       # TextKit 2 NSTextView editor: markdown styling, highlights + hover comments
 │   ├── MarkdownStyling.swift     # Pure logic: markdown span ranges, EditorHighlight + range adjustment
 │   ├── Storage.swift             # EntryStorage (entries folder + bookmark) and StorageTransfer (move/copy)
+│   ├── Versions.swift            # EntryVersionStore: manual versions + voice notes under Entries/ (pure, tested)
+│   ├── VoiceNotes.swift          # VoiceNoteRecorder (AVAudioRecorder → temp .m4a) and VoiceNotePlayer
 │   └── freewrite.entitlements    # App permissions
 ├── CLAUDE.md                     # This file
 └── AGENTS.md                     # Duplicate of this file
@@ -100,8 +102,27 @@ struct HumanEntry: Identifiable {
     var previewText: String       // First 30 chars or "Video Entry"
     var entryType: EntryType      // .text or .video
     var videoFilename: String?    // Format: [UUID]-[YYYY-MM-DD-HH-mm-ss].mov
+    var versionCount = 1          // from Entries/<base>/entry.json; drives the history "v3" badge
+    var hasVoiceNote = false
 }
 ```
+
+### Versions (`Versions.swift`)
+
+The top-level `[UUID]-[date].md` is **always the current, editable version** (autosave, preview, launch selection and ⌘K keep using it). Sealed versions and voice notes live in `Entries/[UUID]-[date]/`, created lazily:
+
+```
+Entries/[UUID]-[date]/
+  entry.json             {"current":"v2","versions":[{"id":"v1","n":1,"createdAt":ISO8601,"source":"voice-note","audio":"audio/v1.m4a"},{"id":"v2",…,"source":"typed"}]}
+  versions/v1.md         sealed, read-only snapshots
+  audio/v1.m4a           voice note of v1 (a second note for the same version: v1-2.m4a, older path kept in "previousAudio")
+  audio/v1.transcript.md raw transcript from the engine
+```
+
+- No `Entries/` folder = one implicit version v1 (createdAt from the filename). Fully backwards compatible.
+- `EntryVersionStore(root:)` (`EntryStorage.shared.versionStore`) is the API, also meant for the AI reviewer: `manifest(for:)`, `versions(for:)`, `text(of:for:)` (current version is read from the top-level file), `entryDirectory(for:)` (put `annotations.json` here), `url(forRelativePath:entryFilename:)`, `sealCurrent(entryFilename:)`, `attachVoiceNote(from:to:)`, `saveTranscript(_:forAudio:entryFilename:)`, `deleteEntryDirectory(for:)`, `savedManifests()`.
+- `sealCurrent` refuses empty text, then writes atomically in order: `versions/vN.md` → manifest (current = vN+1) → empty top-level file. An interruption can duplicate text into the new version, never lose it. A corrupt `entry.json` makes it throw instead of being overwritten.
+- `Entries` is in `StorageTransfer.managedDirectoryNames`; `deleteEntry` removes `Entries/<base>/` too.
 
 ### File Storage
 
@@ -110,6 +131,8 @@ struct HumanEntry: Identifiable {
 - Custom: any folder picked in Settings › Storage (e.g. real `~/Documents/Freewrite` or iCloud Drive), kept as a security-scoped bookmark (`UserDefaults["storageFolderBookmark"]`). On launch the bookmark is resolved (refreshed if stale) and `startAccessingSecurityScopedResource()` is held for the app's lifetime; access to the old folder stops when switching. If it can't be resolved or the folder is gone, the bookmark is cleared, the default folder is used and `ContentView` shows a one-time alert.
 - Never build paths from `.documentDirectory` directly: `ContentView.getDocumentsDirectory()` / `getVideosDirectory()` read `EntryStorage`, and anything resolved before an `await` must be re-resolved afterwards because the folder can change at runtime. Exception: the Hex transcript is tied to the recording: it's written next to the `.mov` where it was saved and, after a move/copy, next to its counterpart in the current folder (`saveHexTranscript`); write failures are logged. `ContentView` reloads entries on `.onChange(of: storage.rootURL)`.
 - Switching folders asks **Move / Copy / Just Switch / Cancel** (skipped when the current folder has no entries). `StorageTransfer` handles top-level canonical `[UUID]-[yyyy-MM-dd-HH-mm-ss].md`/legacy `.mov` files (`StorageTransfer.parseEntryFilename`, shared with the entry loader) plus the managed subfolders (`managedDirectoryNames`, currently `Videos/`; add new Freewrite-owned subfolders there). It never overwrites an existing destination file (skipped + reported), copies via hidden `.partial` temp names, runs a first pass off the main actor and a final pass on it (picking up saves made meanwhile), and deletes originals only if every copy succeeded; on any failure nothing is deleted and the folder doesn't change. Files that vanished from the source after the first pass are removed from the destination (`dropVanished`), and deleting entries is blocked while `isTransferring`. After a move only folders holding nothing but `.DS_Store` are removed. Unrelated files in the folder (README.md, holiday.mov, hidden files) are left alone.
+- Never build paths from `.documentDirectory` directly: `ContentView.getDocumentsDirectory()` / `getVideosDirectory()` read `EntryStorage`, and anything resolved before an `await` (e.g. the Hex transcript path) must be re-resolved afterwards because the folder can change at runtime. `ContentView` reloads entries on `.onChange(of: storage.rootURL)`.
+- Switching folders asks **Move / Copy / Just Switch / Cancel** (skipped when the current folder has no entries). `StorageTransfer` handles top-level `.md`/legacy `.mov` files plus the managed subfolders (`managedDirectoryNames`, currently `Videos/` and `Entries/`; add new Freewrite-owned subfolders there). It never overwrites an existing destination file (skipped + reported), copies via hidden `.partial` temp names, runs a first pass off the main actor and a final pass on it (picking up saves made meanwhile), and deletes originals only if every copy succeeded; on any failure nothing is deleted and the folder doesn't change. Unrelated files in the folder are left alone.
 
 **Text Entries**:
 - Format: Markdown (.md)
@@ -240,10 +263,12 @@ struct VideoPlayerView: View {
 ### Left Side
 - Empty for text entries (font controls moved to Settings)
 - **Video Mode Left Slot**: `Copy Transcript` when viewing a video entry
+- **Text Mode Left Slot**: `vN ⌃` version menu (only once an entry has >1 version or a voice note; lists versions + "New Version"), `Play voice note` for the current version's audio, and transient status (`Transcribing…`, errors)
 
 ### Right Side (Utilities)
 - **Timer**: Shows time remaining, click to start/stop, double-click to reset (to the Settings session length)
 - **Video Camera (🎥)**: Opens immersive video recording overlay
+- **Microphone (🎙)**: Records an audio-only voice note; while recording the utility buttons are replaced by `● 3:42 ▁▃▅ Stop • Discard`
 - **Chat**: Opens AI chat menu (ChatGPT/Claude integration)
 - **Backspace Toggle**: Enable/disable backspace key
 - **Fullscreen**: Toggle fullscreen mode
@@ -265,6 +290,20 @@ struct VideoPlayerView: View {
 
 ### Accessibility
 Bottom-bar controls, the editor and history rows carry `accessibilityLabel`s (where the visible text isn't enough) and stable `accessibilityIdentifier`s (`timerButton`, `recordVideoButton`, `historyButton`, `settingsButton`, `newEntryButton`, `editor`, `historyRow-<uuid>`, `commandPaletteSearch`, …) for VoiceOver and UI automation.
+
+## Versions & Voice Notes Flow
+
+**New Version** (`AppCommand.newVersion`, ⇧⌘N, version menu, ⌘K): only for a text entry with non-empty text. `ContentView.createNewVersion()` saves the editor to disk first (aborts if that fails), calls `sealCurrent`, then clears `text` to an empty page for vN+1.
+
+**Viewing a sealed version**: version menu, or a ⌘K hit on a sealed version (`PaletteDocument.version`). `viewedVersion`/`viewedVersionText` are shown via `WritingEditor(text: .constant(…), isEditable: false)` with a top banner `Viewing v1 · read-only • Play voice note • Back to current`. `text` (the current version) is never touched, so autosave can't write a sealed version into the top-level file. Selecting/creating another entry or switching folders resets to the current version (`resetVersionState`).
+
+**Voice note** (`AppCommand.recordVoiceNote`, ⇧⌘V, mic icon):
+1. Microphone permission is requested if needed; if denied a popover (same style as the camera's) links to System Settings.
+2. `VoiceNoteRecorder` records AAC mono 44.1 kHz to a temp `.m4a`, no time limit. Discard deletes it.
+3. On Stop: the selected text entry gets it if its text is empty or it already has versions; otherwise a new entry is created (like videos). A text entry with versions is never converted to a video entry either.
+4. `attachVoiceNote` moves the file to `audio/<current>.m4a` and records it on the current version (`source: voice-note` if that version's text is empty).
+5. The engine from Settings › Transcription runs on the file (`TranscriptionEngine.transcribe(fileURL:)`): Hex → `HexTranscriber`; Apple → `AppleFileTranscriber` (macOS 26 `SpeechAnalyzer` + `SpeechTranscriber`, installing the locale model via `AssetInventory`; falls back to `SFSpeechURLRecognitionRequest`, on-device when supported). Speech permission is only needed here.
+6. The raw transcript goes to `audio/<v>.transcript.md` and is appended to the current text (as `text` if the entry is still selected, else straight to the file) — unless that version was sealed meanwhile. On failure the audio is kept, the text left alone, and the error shows briefly.
 
 ## Video Recording Flow
 
@@ -357,6 +396,8 @@ Required entitlements in `freewrite.entitlements`:
 <key>com.apple.security.personal-information.speech-recognition</key>
 <true/>
 ```
+
+The microphone is also used for voice notes; speech recognition is needed for Apple transcription of videos (live) and voice notes (from file), not for Hex.
 
 Privacy usage descriptions (in Xcode project build settings):
 
@@ -931,6 +972,7 @@ Stored in `UserDefaults` (keys in `SettingsKey`, read via `@AppStorage`):
 - `fontName`, `fontSize`: writing font family/PostScript name and size
 - `sessionMinutes`: timer length (default 15)
 - `shortcuts`: JSON map of `AppCommand` → shortcut overrides
+- `transcriptionEngine`: `apple` or `hex` (videos and voice notes)
 - `storageFolderBookmark`: security-scoped bookmark of the custom entries folder (missing = default container folder); edited in Settings › Storage (path, Choose Folder…, Show in Finder, Use Default)
 
 Session-only (not persisted): backspace state

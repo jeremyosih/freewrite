@@ -21,6 +21,8 @@ struct WritingEditor: NSViewRepresentable {
     var focusKey: AnyHashable? = nil
     /// False while something else (the ⌘K palette) owns the keyboard.
     var canTakeFocus: Bool = true
+    /// False shows the text read-only (selectable, not editable), e.g. a sealed version.
+    var isEditable: Bool = true
 
     /// `.custom`-style lookup: PostScript name, then family name, then the system font.
     static func font(named name: String, size: CGFloat) -> NSFont {
@@ -36,6 +38,7 @@ struct WritingEditor: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let textView = WritingTextView(usingTextLayoutManager: true)
         textView.isRichText = false
+        textView.isEditable = isEditable
         textView.importsGraphics = false
         textView.allowsUndo = true
         textView.drawsBackground = false
@@ -73,6 +76,7 @@ struct WritingEditor: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         let coordinator = context.coordinator
         coordinator.binding = $text
+        coordinator.setEditable(isEditable)
 
         let theme = EditorTheme(self)
         if theme != coordinator.theme {
@@ -154,6 +158,11 @@ struct WritingEditor: NSViewRepresentable {
             let string = textView.string
             lastText = string
             binding?.wrappedValue = string
+        }
+
+        func setEditable(_ isEditable: Bool) {
+            guard let textView, textView.isEditable != isEditable else { return }
+            textView.isEditable = isEditable
         }
 
         func undoManager(for view: NSTextView) -> UndoManager? {
