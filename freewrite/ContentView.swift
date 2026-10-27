@@ -192,6 +192,8 @@ struct ContentView: View {
     @State private var isHoveringOverflow = false
     /// Items in the "…" menu of the bar on screen.
     @State private var barOverflow: [BottomBarItem] = []
+    /// The "/" template menu of the editor (TemplateMenu.swift).
+    @State private var templateMenu = TemplateMenuController()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHoveringReview = false
     /// Keys of locked notes while they are open (Touch ID / Apple Watch / password).
@@ -1023,6 +1025,7 @@ struct ContentView: View {
         let loadID = UUID()
         paletteLoadID = loadID
         paletteIndex = nil
+        templateMenu.close()
         showingCommandPalette = true
         // Read and fold every entry's text (or video transcript) off the main thread.
         let sources: [(entry: HumanEntry, url: URL?)] = entries.map { entry in
@@ -1144,6 +1147,35 @@ struct ContentView: View {
             fontSizeSetting = sizes[min(max(index + step, 0), sizes.count - 1)]
         case .showWelcomeEntry:
             showWelcomeEntry()
+        case .insertTemplate:
+            insertTemplate()
+        }
+    }
+
+    /// Insert Template…: the "/" menu at the caret, for the current version of a text entry.
+    private func insertTemplate() {
+        guard selectedTextEntry != nil, !isSelectedNoteClosed, viewedVersion == nil,
+              !showingVideoRecording, !isPreparingVideoRecording else {
+            showStatus(viewedVersion != nil ? "Go back to the current version to insert a template." : "Templates go into a text entry.")
+            return
+        }
+        // An open bar menu's key monitor would take the menu's typing, arrows and Return.
+        closeBarMenu()
+        templateMenu.editTemplatesHandler = { openTemplateSettings() }
+        // After the palette (if it was open) has given the editor its focus back.
+        DispatchQueue.main.async {
+            if !templateMenu.openAtCaret() {
+                showStatus("Click into the text, then insert a template.")
+            }
+        }
+    }
+
+    private func openTemplateSettings() {
+        UserDefaults.standard.set(SettingsPane.templates.rawValue, forKey: "settingsPane")
+        if let window = SettingsWindow.window {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            SettingsWindow.toggle(openSettings)
         }
     }
 
@@ -1933,7 +1965,8 @@ struct ContentView: View {
                         focusKey: selectedEntryId,
                         canTakeFocus: !showingCommandPalette,
                         isEditable: viewedVersion == nil,
-                        verticalInset: noteTopInset
+                        verticalInset: noteTopInset,
+                        templateMenu: templateMenu
                     )
                     // Text fades out under the thin top margin as it scrolls up.
                     .mask {
@@ -1958,8 +1991,13 @@ struct ContentView: View {
                             // Check if backspace is disabled and the key is delete/backspace
                             // Only the writing editor: leave the palette search and the Settings window alone.
                             let isSettingsWindow = event.window?.identifier?.rawValue.contains("Settings") == true
+                            // Plain Backspace may still edit a "/" template query (never the "/" or the text before it);
+                            // ⌘/⌥/⌃ deletions reach past the query, so they stay blocked.
+                            let plainBackspace = event.keyCode == 51
+                                && event.modifierFlags.intersection([.command, .option, .control]).isEmpty
                             if backspaceDisabled && !showingCommandPalette && !isSettingsWindow
-                                && (event.keyCode == 51 || event.keyCode == 117) {
+                                && (event.keyCode == 51 || event.keyCode == 117)
+                                && !(plainBackspace && templateMenu.allowsBackspace) {
                                 // Block the backspace/delete key
                                 return nil
                             }
@@ -2220,6 +2258,9 @@ struct ContentView: View {
             barMenuOverlay(anchors)
         }
         .overlay {
+            TemplateMenuOverlay(controller: templateMenu, isDark: colorScheme == .dark)
+        }
+        .overlay {
             if showingCommandPalette {
                 CommandPaletteView(
                     index: paletteIndex,
@@ -2252,6 +2293,7 @@ struct ContentView: View {
         .preferredColorScheme(colorScheme)
         .onAppear {
             WritingWindow.openCount += 1
+            templateMenu.editTemplatesHandler = { openTemplateSettings() }
             installTimerScrollMonitor()
             showingSidebar = false  // Hide sidebar by default
             timeRemaining = sessionMinutes * 60
@@ -3673,6 +3715,7 @@ extension ContentView {
 
     private func showBarMenu(_ kind: BarMenuKind) {
         barMenuHighlight = nil
+        templateMenu.close()
         withAnimation(.easeOut(duration: 0.15)) {
             openBarMenu = kind
             bottomNavOpacity = 1.0

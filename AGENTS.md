@@ -88,6 +88,9 @@ freewrite/
 │   ├── AgentsSettingsView.swift  # Settings › Agents: providers + reviewer list/inline editor; kind swatches + legend
 │   ├── NoteLock.swift            # Locked notes: .fwlock format, recovery key, Secure Enclave vault, NoteLockSession
 │   ├── PrivacySettingsView.swift # Settings › Privacy + recovery key sheets
+│   ├── Templates.swift           # Templates: model, store (UserDefaults["templates"]), {{placeholders}}, matching, slash trigger (pure, tested)
+│   ├── TemplateMenu.swift        # "/" template menu: controller (driven by the editor), placement, overlay card
+│   ├── TemplatesSettingsView.swift # Settings › Templates: list + inline editor
 │   └── freewrite.entitlements    # App permissions
 ├── Vendor/PiDurableKit/          # Vendored finnvoor/PiDurableKit (CC0), local Swift package; see VENDORED.md
 ├── CLAUDE.md                     # This file
@@ -280,10 +283,11 @@ struct VideoPlayerView: View {
 - The Chat (ChatGPT/Claude) feature was removed.
 
 ### Settings Window & Shortcuts (`SettingsView.swift`)
-- `Settings { SettingsView() }` scene in `freewriteApp.swift`, 760×560, styled like Hex's settings with native components: a sidebar `List` of monochrome SF Symbols (no coloured tiles or tints) in sections — **General** (no header), **Settings**: Recording, Storage, Permissions, Privacy, Agents, Bottom Bar, Shortcuts, **Freewrite**: About — with the app version (`AppVersion.display`) pinned at the bottom of the sidebar, and a large left-aligned page title at the top of the detail area (no toolbar title). Last pane in `UserDefaults["settingsPane"]`.
+- `Settings { SettingsView() }` scene in `freewriteApp.swift`, 760×560, styled like Hex's settings with native components: a sidebar `List` of monochrome SF Symbols (no coloured tiles or tints) in sections — **General** (no header), **Settings**: Recording, Storage, Permissions, Privacy, Agents, Templates, Bottom Bar, Shortcuts, **Freewrite**: About — with the app version (`AppVersion.display`) pinned at the bottom of the sidebar, and a large left-aligned page title at the top of the detail area (no toolbar title). Last pane in `UserDefaults["settingsPane"]`.
 - Adding a pane = a case in `SettingsPane` (title, `systemImage`, `group`) + its view in `SettingsView.pane(_:)`.
 - Rows are compact: title + small secondary subtitle on the left (`LabeledContent`/`Picker` with two `Text`s in the label inside `Form.grouped`), the control on the right. Panes that aren't a `Form` (Agents) use `SettingsCard` / `SettingsCardRow` / `SettingsSectionHeader` from `SettingsView.swift`, which look the same.
 - Privacy: locked-note count, open/locked + Lock Now, timeout, recovery key rows (Show…, Create…, Unlock… for notes from another Mac), then what locking protects (`PrivacySettingsView.swift`).
+- Templates: two columns like Agents: the template list (name + first line; drag to reorder, +/−, ⋯ → Move Up/Down, Duplicate, Restore Default Templates) and the selected template's editor inline (name, text in a monospaced `TextEditor`, placeholder note). Edits save as you type; an empty name becomes "Untitled Template" when you move on.
 - Agents: providers card (Anthropic key, ChatGPT sign-in / OpenAI key) and the "reviews send this entry's text" note on top; below, two columns like Hex's Modes: the reviewer list (colour dot, model, kind swatches; +/−, ⋯ → Restore Default Reviewers) and the selected reviewer's editor inline (name, colour, instructions, model, thinking, scope, auto-run, allowed kinds + default kind). Edits save as you type; no sheet.
 - General: font, size + preview, then a trailing row **Random Font** / **Reset to Default** (Lato 18; random must not sit on the Font row), theme, timer length.
 - Recording: Microphone (System default + `AudioInputDevices.available()`, stored as `microphoneID`), live Input level (`AudioInputCapture`, only when mic access is already granted — Settings never prompts), then Transcription engine; Apple → Language (Automatic + `SFSpeechRecognizer.supportedLocales()`, `AppleSpeechLanguage`), Hex → status, model, language.
@@ -301,6 +305,15 @@ struct VideoPlayerView: View {
 - UI: accent-tinted highlight, no dimming (a clear full-window hit area closes on click outside), list height fits the rows up to 380pt (`onGeometryChange`). VoiceOver: keyboard moves post an announcement with the highlighted title; rows have `.isSelected` and a default action.
 - Review actions: `PaletteIndex.reviewActions` (`PaletteReviewActions`, captured on open from the version on screen) adds **Review with <reviewer>** per profile (hidden while a review runs and for locked notes; a row whose version is no longer on screen refuses with a status), **Clear Review (n notes)** when that version has notes, and **Reviewers & Models…** (Settings › Agents).
 - Selecting an entry goes through `selectEntry(id:version:)` (same save-then-load path as history rows). The backspace blocker ignores the palette and the Settings window.
+
+### Templates ("/" menu, `Templates.swift`, `TemplateMenu.swift`)
+- Typing "/" at the start of a line or after whitespace (`SlashTrigger.opens`) in the editable editor opens a `BarMenuCard` of templates under that line (`TemplateMenuPlacement`: text aligned with the "/", kept inside the window, flips above the line when there's no room below, max 320pt then scrolls). Never in read-only (sealed version) mode or while IME text is marked. ⌘K / Write menu **Insert Template…** (`AppCommand.insertTemplate`, no default shortcut) opens it at the caret without a "/".
+- Flow: the editor's coordinator records a pending "/" in `shouldChangeTextIn`, opens the menu once the "/" is in the text (selection/text notifications can come in either order), and on every text/selection change/scroll recomputes the query (`SlashTrigger.query`: text from just after the "/" to the caret). It closes when the "/" is gone, the caret leaves the query or selects, the query spans a line break or passes 40 chars, the query ends in whitespace with no matches (`SlashTrigger.shouldClose`), Esc (`cancelOperation:`/`complete:`), a click anywhere but the card (local mouse-down monitor, the click still lands), the window resigning key, an entry load, the palette or a bar menu opening.
+- Keys go through `textView(_:doCommandBy:)` while it's open: ↑/↓ move (wrap), ↩/⇥ insert the highlighted row (with no match ↩ just closes and types the newline). Clicking a row inserts it. With an empty query the card also has **Edit Templates…** (Settings › Templates); it's left out once you type so ↩ after a typo never opens Settings.
+- Insertion replaces "/query" with `TemplateExpander.expand(body)` via `insertText(_:replacementRange:)` between `breakUndoCoalescing()` calls, so it's one undo step (⌘Z brings back "/query") and autosave/annotation anchors see one ordinary edit. `{{date}}` (full date) and `{{time}}` (short time) use the current locale; the caret lands on the first `{{cursor}}` (others are dropped), else at the end.
+- Backspace off: backspace is still allowed while the menu is open and the query is non-empty (`TemplateMenuController.allowsBackspace`), so a typo in the query can be fixed; it never deletes the "/" or text before it. Forward delete stays blocked.
+- Matching (`TemplateSearch`): case/diacritic folding from `PaletteIndex.fold`; names starting with the query, then a word starting with it, then containing it, then word-start abbreviations (`PaletteSearch.matchesWordStarts`, "mn" → Meeting notes); ties keep the user's order.
+- Storage: `WritingTemplate {id, name, body}` array as JSON in `UserDefaults["templates"]` (`SettingsKey.templates`); missing/unreadable = defaults: Farza's starting prompts from the welcome note `default.md` (Plan my day, Something happened, New idea, In love, Pivot); an empty array is kept. Tests: `freewriteTests/TemplateTests.swift` (run headless in a scratch package with `Templates.swift`, `PaletteSearch.swift` and a `SettingsKey`/`AppCommand` shim).
 
 ### Accessibility
 Bottom-bar controls, the editor and history rows carry `accessibilityLabel`s (where the visible text isn't enough) and stable `accessibilityIdentifier`s (`timerButton`, `recordVideoButton`, `historyButton`, `settingsButton`, `newEntryButton`, `editor`, `historyRow-<uuid>`, `commandPaletteSearch`, …) for VoiceOver and UI automation.
@@ -1013,6 +1026,7 @@ Stored in `UserDefaults` (keys in `SettingsKey`, read via `@AppStorage`):
 - `appleTranscriptionLanguage`: locale id for Apple transcription (empty = automatic)
 - `microphoneID`: `AVCaptureDevice.uniqueID` / Core Audio UID of the recording input (empty = system default)
 - `reviewers`: JSON array of `ReviewerProfile` (missing = Mirror/Editor/Coach defaults)
+- `templates`: JSON array of `WritingTemplate` (missing = the welcome note's starting prompts)
 - `settingsPane`: last Settings pane
 - `noteLockTimeoutMinutes`: locked notes close after this many minutes without using Freewrite (1/5/15, default 5; 0 = only when the Mac sleeps)
 - `storageFolderBookmark`: security-scoped bookmark of the custom entries folder (missing = default container folder); edited in Settings › Storage (path, Choose Folder…, Show in Finder, Use Default)

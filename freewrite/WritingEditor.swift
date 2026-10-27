@@ -27,6 +27,8 @@ struct WritingEditor: NSViewRepresentable {
     var isEditable: Bool = true
     /// Breathing room before the first line (and after the last); it scrolls with the text.
     var verticalInset: CGFloat = 0
+    /// The "/" template menu, opened by typing "/" at the start of a line or after a space.
+    var templateMenu: TemplateMenuController? = nil
 
     /// `.custom`-style lookup: PostScript name, then family name, then the system font.
     static func font(named name: String, size: CGFloat) -> NSFont {
@@ -70,6 +72,7 @@ struct WritingEditor: NSViewRepresentable {
 
         let coordinator = context.coordinator
         coordinator.attach(to: textView, in: scrollView)
+        coordinator.setTemplateMenu(templateMenu)
         coordinator.apply(EditorTheme(self))
         coordinator.load(text)
         coordinator.setHighlights(highlights)
@@ -89,6 +92,7 @@ struct WritingEditor: NSViewRepresentable {
         coordinator.binding = $text
         coordinator.onDismissHighlight = onDismissHighlight
         coordinator.setEditable(isEditable)
+        coordinator.setTemplateMenu(templateMenu)
 
         let theme = EditorTheme(self)
         if theme != coordinator.theme {
@@ -115,6 +119,7 @@ struct WritingEditor: NSViewRepresentable {
 
     static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
         coordinator.closePopover()
+        coordinator.templateMenu?.close()
     }
 
     // MARK: - Coordinator
@@ -133,6 +138,9 @@ struct WritingEditor: NSViewRepresentable {
 
         private weak var textView: WritingTextView?
         private let undoManager = UndoManager()
+        private(set) weak var templateMenu: TemplateMenuController?
+        /// Where a "/" that may open the template menu is being typed (set just before the edit).
+        private var pendingSlash: Int?
         private var popover: NSPopover?
         private var popoverHighlightId: String?
 
@@ -164,6 +172,7 @@ struct WritingEditor: NSViewRepresentable {
             guard let textView else { return }
             lastText = text
             closePopover()
+            templateMenu?.close()
             textView.string = text  // styled by the storage delegate
             textView.setSelectedRange(NSRange(location: 0, length: 0))
             textView.scroll(.zero)
@@ -177,11 +186,136 @@ struct WritingEditor: NSViewRepresentable {
             let string = textView.string
             lastText = string
             binding?.wrappedValue = string
+            refreshTemplateMenu()
+            pendingSlash = nil
         }
 
         func setEditable(_ isEditable: Bool) {
             guard let textView, textView.isEditable != isEditable else { return }
             textView.isEditable = isEditable
+            if !isEditable {
+                templateMenu?.close()
+            }
+        }
+
+        // MARK: Template menu
+
+        func setTemplateMenu(_ menu: TemplateMenuController?) {
+            guard menu !== templateMenu else { return }
+            templateMenu?.close()
+            templateMenu = menu
+            menu?.insertHandler = { [weak self] template in
+                self?.insertTemplate(template)
+            }
+            menu?.openAtCaretHandler = { [weak self] in
+                self?.openTemplateMenuAtCaret() ?? false
+            }
+        }
+
+        func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
+            // A "/" typed at the start of a line or after whitespace opens the menu once it's in.
+            pendingSlash = nil
+            if replacementString == "/", range.length == 0, textView.isEditable, !textView.hasMarkedText(),
+               let menu = templateMenu, !menu.isOpen,
+               SlashTrigger.opens(at: range.location, in: textView.string as NSString) {
+                pendingSlash = range.location
+            }
+            return true
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            refreshTemplateMenu()
+        }
+
+        /// Opens the menu after a trigger "/", keeps its query and position current, or closes it
+        /// when the caret left the query.
+        private func refreshTemplateMenu() {
+            guard let textView, let menu = templateMenu else { return }
+            let string = textView.string as NSString
+            // Selection and text notifications can come in either order; open on the first one
+            // that sees the "/" in place (textDidChange drops the pending trigger after).
+            if let slash = pendingSlash, !menu.isOpen, slash < string.length, string.character(at: slash) == 0x2F,
+               textView.selectedRange() == NSRange(location: slash + 1, length: 0) {
+                pendingSlash = nil
+                menu.open(slash: slash, queryStart: slash + 1, anchor: anchorRect(at: slash, hasSlash: true), in: textView.window)
+            }
+            guard let session = menu.session else { return }
+            // Mid-composition (IME) the menu is suspended: the query is read again once the text is committed.
+            if textView.hasMarkedText() { return }
+            guard textView.isEditable,
+                  let query = SlashTrigger.query(in: string, slashAt: session.slash, queryStart: session.queryStart, caret: textView.selectedRange()) else {
+                menu.close()
+                return
+            }
+            menu.update(query: query, anchor: anchorRect(at: session.slash ?? session.queryStart, hasSlash: session.slash != nil))
+        }
+
+        /// The line of the "/" (or the caret), in the window content view's top-left coordinates.
+        private func anchorRect(at location: Int, hasSlash: Bool) -> CGRect {
+            guard let textView, let window = textView.window else { return .zero }
+            let length = hasSlash ? 1 : 0
+            var rect = textView.firstRect(forCharacterRange: NSRange(location: location, length: length), actualRange: nil)
+            if rect.height == 0 {
+                rect.size.height = textView.font?.boundingRectForFont.height ?? 18
+            }
+            return TemplateMenuController.contentRect(fromScreen: rect, in: window)
+        }
+
+        /// Replaces "/query" with the expanded template as one undoable edit, caret at `{{cursor}}`.
+        private func insertTemplate(_ template: WritingTemplate) {
+            guard let textView, let menu = templateMenu, let session = menu.session else { return }
+            let caret = textView.selectedRange()
+            let start = session.slash ?? session.queryStart
+            menu.close()
+            guard textView.isEditable, caret.length == 0, caret.location >= start else { return }
+            let range = NSRange(location: start, length: caret.location - start)
+            let expanded = TemplateExpander.expand(template.body)
+            // Its own undo step: ⌘Z brings back "/query", not less, not more.
+            textView.breakUndoCoalescing()
+            textView.insertText(expanded.text, replacementRange: range)
+            textView.breakUndoCoalescing()
+            let location = start + expanded.caret
+            textView.setSelectedRange(NSRange(location: location, length: 0))
+            textView.scrollRangeToVisible(NSRange(location: location, length: 0))
+        }
+
+        /// Insert Template…: opens the menu at the caret, no "/" typed. False when the editor
+        /// can't take text right now.
+        private func openTemplateMenuAtCaret() -> Bool {
+            guard let textView, let window = textView.window, textView.isEditable,
+                  !textView.hasMarkedText(), let menu = templateMenu else { return false }
+            if window.firstResponder !== textView {
+                window.makeFirstResponder(textView)
+            }
+            let selection = textView.selectedRange()
+            let caret = NSMaxRange(selection)
+            if selection.length > 0 {
+                textView.setSelectedRange(NSRange(location: caret, length: 0))
+            }
+            menu.close()
+            menu.open(slash: nil, queryStart: caret, anchor: anchorRect(at: caret, hasSlash: false), in: window)
+            return true
+        }
+
+        func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            // Keys during composition belong to the input method, not the menu.
+            guard let menu = templateMenu, menu.isOpen, !textView.hasMarkedText() else { return false }
+            switch selector {
+            case #selector(NSResponder.moveDown(_:)):
+                menu.move(1)
+            case #selector(NSResponder.moveUp(_:)):
+                menu.move(-1)
+            case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertTab(_:)):
+                guard menu.chooseHighlighted() else {
+                    menu.close()
+                    return false
+                }
+            case #selector(NSResponder.cancelOperation(_:)), #selector(NSTextView.complete(_:)):
+                menu.close()
+            default:
+                return false
+            }
+            return true
         }
 
         func undoManager(for view: NSTextView) -> UndoManager? {
@@ -368,6 +502,10 @@ struct WritingEditor: NSViewRepresentable {
 
         @objc private func scrolled() {
             closePopover()
+            // The menu follows its line.
+            if templateMenu?.isOpen == true {
+                refreshTemplateMenu()
+            }
         }
     }
 }
