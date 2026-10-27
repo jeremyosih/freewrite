@@ -1939,12 +1939,14 @@ struct ContentView: View {
                         verticalInset: noteTopInset,
                         templateMenu: templateMenu
                     )
-                    // Text fades out under the thin top margin as it scrolls up.
+                    // Text fades out under the thin top and bottom margins as it scrolls.
                     .mask {
                         VStack(spacing: 0) {
                             LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
                                 .frame(height: noteTopInset)
                             Color.black
+                            LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                                .frame(height: noteTopInset)
                         }
                     }
                     .background(Color(colorScheme == .light ? .white : .black))
