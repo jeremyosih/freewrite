@@ -57,8 +57,8 @@ Freewrite is a native macOS writing application built with SwiftUI that allows u
 
 ### Technology Stack
 - **Framework**: SwiftUI (macOS)
-- **Minimum macOS Version**: 14.0
-- **Language**: Swift 5.0
+- **Minimum macOS Version**: 26.0
+- **Language**: Swift 6 (language mode 6; `CameraManager` is `@unchecked Sendable` and hops queues manually)
 - **Build System**: Xcode
 - **Media**: AVFoundation for camera/video recording
 

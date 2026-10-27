@@ -215,13 +215,16 @@ struct VideoPlayerView: View {
             forInterval: CMTime(seconds: 0.05, preferredTimescale: 600),
             queue: .main
         ) { time in
-            let seconds = CMTimeGetSeconds(time)
-            if seconds.isFinite && seconds >= 0 {
-                self.playbackSecondsForCurrentItem = seconds
-            } else {
-                self.playbackSecondsForCurrentItem = 0
+            // Delivered on the main queue (queue: .main above).
+            MainActor.assumeIsolated {
+                let seconds = CMTimeGetSeconds(time)
+                if seconds.isFinite && seconds >= 0 {
+                    self.playbackSecondsForCurrentItem = seconds
+                } else {
+                    self.playbackSecondsForCurrentItem = 0
+                }
+                self.revealVideoWhenReady()
             }
-            self.revealVideoWhenReady()
         }
     }
 
