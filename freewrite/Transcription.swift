@@ -44,6 +44,23 @@ extension SettingsKey {
     /// Empty means "pick the best installed model".
     static let hexModel = "hexModel"
     static let hexLanguage = "hexLanguage"
+    /// Locale identifier for Apple transcription; empty = the Mac's language.
+    static let appleTranscriptionLanguage = "appleTranscriptionLanguage"
+}
+
+/// The language Apple's speech recognition transcribes in (Settings › Recording).
+enum AppleSpeechLanguage {
+    static var locale: Locale {
+        let identifier = UserDefaults.standard.string(forKey: SettingsKey.appleTranscriptionLanguage) ?? ""
+        return identifier.isEmpty ? .current : Locale(identifier: identifier)
+    }
+
+    /// Locales Apple's recognizer supports, sorted by display name.
+    static func supported() -> [(id: String, name: String)] {
+        SFSpeechRecognizer.supportedLocales()
+            .map { (id: $0.identifier, name: Locale.current.localizedString(forIdentifier: $0.identifier) ?? $0.identifier) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
 }
 
 // MARK: - Hex local API client
@@ -347,12 +364,12 @@ enum AppleFileTranscriber {
         var errorDescription: String? {
             switch self {
             case .notAuthorized: return "Speech recognition isn't allowed. Turn it on in System Settings › Privacy & Security."
-            case .unavailable: return "On-device speech recognition isn't available for your language. Try Hex in Settings › Transcription."
+            case .unavailable: return "On-device speech recognition isn't available for your language. Try another language or Hex in Settings › Recording."
             }
         }
     }
 
-    static func transcribe(fileURL: URL, locale: Locale = .current) async throws -> String {
+    static func transcribe(fileURL: URL, locale: Locale = AppleSpeechLanguage.locale) async throws -> String {
         guard await requestAuthorization() else { throw Failure.notAuthorized }
         if SpeechTranscriber.isAvailable,
            let supported = await SpeechTranscriber.supportedLocale(equivalentTo: locale) {

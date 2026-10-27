@@ -67,7 +67,9 @@ freewrite/
 │   ├── ContentView.swift         # Main view (1400+ lines)
 │   ├── VideoRecordingView.swift  # Video recording interface
 │   ├── VideoPlayerView.swift     # Video playback interface
-│   ├── SettingsView.swift        # Settings window (⌘,), stored settings keys, shortcuts + menu commands
+│   ├── SettingsView.swift        # Settings window (⌘,): pane enum + sidebar, General/Shortcuts panes, settings keys, shortcuts + menu commands
+│   ├── SettingsPanes.swift       # Settings › Recording, Storage, Permissions, About
+│   ├── AudioInput.swift          # Microphone choice (AVCaptureDevice ids) + AVAudioEngine capture for a chosen input / level meter
 │   ├── Transcription.swift       # Transcription engines: Apple (live, on-device) or Hex local API client
 │   ├── CommandPalette.swift      # ⌘K palette: full-text entry search + actions
 │   ├── BottomBar.swift           # Bottom bar layout model (item, side, order) + Settings › Bottom Bar pane
@@ -264,7 +266,13 @@ struct VideoPlayerView: View {
 - The Chat (ChatGPT/Claude) feature was removed.
 
 ### Settings Window & Shortcuts (`SettingsView.swift`)
-- `Settings { SettingsView() }` scene in `freewriteApp.swift`; tabs: Writing (font, size, theme, timer length), Transcription, Storage (entries folder), Shortcuts.
+- `Settings { SettingsView() }` scene in `freewriteApp.swift`, 720×540, laid out like System Settings / Scrawl: a sidebar `List` with coloured icon tiles (`SettingsIconTile`) in sections — **General** (no header), **Settings**: Recording, Storage, Permissions, Bottom Bar, Shortcuts, **Freewrite**: About — and a toolbar title with the pane's icon. Last pane in `UserDefaults["settingsPane"]`.
+- Adding a pane = a case in `SettingsPane` (title, `systemImage`, `tint`, `group`) + its view in `SettingsView.pane(_:)`.
+- General: font, size + preview, then a trailing row **Random Font** / **Reset to Default** (Lato 18; random must not sit on the Font row), theme, timer length.
+- Recording: Microphone (System default + `AudioInputDevices.available()`, stored as `microphoneID`), live Input level (`AudioInputCapture`, only when mic access is already granted — Settings never prompts), then Transcription engine; Apple → Language (Automatic + `SFSpeechRecognizer.supportedLocales()`, `AppleSpeechLanguage`), Hex → status, model, language.
+- Storage: folder size (computed off-main), Show in Finder, location, Use Default, Choose Folder….
+- Permissions: Microphone, Camera, Speech Recognition (`AppPermission`) with live status (Allowed / Not allowed + Open System Settings / Not asked + Allow…), re-checked when a window becomes key or the app becomes active.
+- About: icon, version (`CFBundleShortVersionString` + build), links, **Show welcome entry** (`AppCommand.showWelcomeEntry` → new entry with `default.md`).
 - Every app action is an `AppCommand`. `FreewriteCommands` builds the menu items with the user's shortcuts and posts `AppCommand.notification`; `ContentView.handle(_:)` performs the action.
 - Shortcuts are stored as JSON overrides in `UserDefaults["shortcuts"]` (missing key = default, `null` = unassigned). Recording requires ⌘, ⌃ or ⌥ so plain typing never triggers a command.
 
@@ -286,10 +294,10 @@ Bottom-bar controls, the editor and history rows carry `accessibilityLabel`s (wh
 
 **Voice note** (`AppCommand.recordVoiceNote`, ⇧⌘V, mic icon):
 1. Microphone permission is requested if needed; if denied a popover (same style as the camera's) links to System Settings.
-2. `VoiceNoteRecorder` records AAC mono 44.1 kHz to a temp `.m4a`, no time limit. Discard deletes it.
+2. `VoiceNoteRecorder` records AAC mono 44.1 kHz to a temp `.m4a`, no time limit. Discard deletes it. With the system default microphone it uses `AVAudioRecorder`; with a microphone chosen in Settings › Recording it uses `AudioInputCapture` (AVAudioEngine with the input unit's current device set, converted to mono 44.1 kHz) because AVAudioRecorder can't pick a device. If that engine stops (device unplugged/config change) the note ends like any unexpected stop. The video capture session uses `AudioInputDevices.captureDevice()` (chosen mic, else default).
 3. On Stop: the selected text entry gets it if its text is empty or it already has versions; otherwise a new entry is created (like videos). A text entry with versions is never converted to a video entry either.
 4. `attachVoiceNote` moves the file to `audio/<current>.m4a` and records it on the current version (`source: voice-note` if that version's text is empty).
-5. The engine from Settings › Transcription runs on the file (`TranscriptionEngine.transcribe(fileURL:)`): Hex → `HexTranscriber`; Apple → `AppleFileTranscriber` (macOS 26 `SpeechAnalyzer` + `SpeechTranscriber`, installing the locale model via `AssetInventory`; falls back to `SFSpeechURLRecognitionRequest`, on-device when supported). Speech permission is only needed here.
+5. The engine from Settings › Recording runs on the file (`TranscriptionEngine.transcribe(fileURL:)`): Hex → `HexTranscriber`; Apple → `AppleFileTranscriber` (macOS 26 `SpeechAnalyzer` + `SpeechTranscriber`, installing the locale model via `AssetInventory`; falls back to `SFSpeechURLRecognitionRequest`, on-device when supported). Speech permission is only needed here.
 6. The raw transcript goes to `audio/<v>.transcript.md` and is appended to the current text (as `text` if the entry is still selected, else straight to the file) — unless that version was sealed meanwhile. On failure the audio is kept, the text left alone, and the error shows briefly.
 
 ## Video Recording Flow
@@ -684,7 +692,7 @@ Key details:
 
 ### Transcription Engines (`Transcription.swift`)
 
-Settings › Transcription picks the engine (`UserDefaults["transcriptionEngine"]`):
+Settings › Recording picks the engine (`UserDefaults["transcriptionEngine"]`); Apple uses the language in `appleTranscriptionLanguage` (`AppleSpeechLanguage.locale`, empty = the Mac's locale) for both live video and file transcription:
 - **Apple (default)**: the live `SFSpeechRecognizer` pipeline above, on-device when supported. Speech permission is required to record.
 - **Hex**: after the recording is saved, `HexTranscriber` decodes the audio to 16 kHz mono, cuts it into ~30 s pieces at quiet points, and POSTs WAV to the running Hex app's local API v2 (`/transcriptions?model=&language=`). Discovery file: `~/Library/Application Support/hex/local-api.json` (or legacy `voice-control/`), holding port + bearer token (never logged). Speech permission is optional; if already granted, Apple's live transcript is saved first and replaced when Hex finishes. Failures show briefly in the video bottom bar.
 - Sandbox: Hex needs `com.apple.security.network.client` plus a read-only home-relative temporary exception for Hex's Application Support folders (fine for direct distribution; the Mac App Store would reject the temporary exception).
@@ -939,6 +947,9 @@ Stored in `UserDefaults` (keys in `SettingsKey`, read via `@AppStorage`):
 - `sessionMinutes`: timer length (default 15)
 - `shortcuts`: JSON map of `AppCommand` → shortcut overrides
 - `transcriptionEngine`: `apple` or `hex` (videos and voice notes)
+- `appleTranscriptionLanguage`: locale id for Apple transcription (empty = automatic)
+- `microphoneID`: `AVCaptureDevice.uniqueID` / Core Audio UID of the recording input (empty = system default)
+- `settingsPane`: last Settings pane
 - `storageFolderBookmark`: security-scoped bookmark of the custom entries folder (missing = default container folder); edited in Settings › Storage (path, Choose Folder…, Show in Finder, Use Default)
 
 Session-only (not persisted): backspace state

@@ -1009,6 +1009,8 @@ struct ContentView: View {
             let index = sizes.firstIndex(of: fontSizeSetting) ?? sizes.firstIndex(of: WritingFont.defaultSize) ?? 0
             let step = command == .increaseFontSize ? 1 : -1
             fontSizeSetting = sizes[min(max(index + step, 0), sizes.count - 1)]
+        case .showWelcomeEntry:
+            showWelcomeEntry()
         }
     }
 
@@ -2381,10 +2383,8 @@ struct ContentView: View {
 
         // If this is the first entry (entries was empty before adding this one)
         if entries.count == 1 {
-            // Read welcome message from default.md
-            if let defaultMessageURL = Bundle.main.url(forResource: "default", withExtension: "md"),
-               let defaultMessage = try? String(contentsOf: defaultMessageURL, encoding: .utf8) {
-                text = defaultMessage
+            if let welcomeMessage = Self.welcomeMessage() {
+                text = welcomeMessage
             }
             // Save the welcome message immediately
             saveEntry(entry: newEntry)
@@ -2399,6 +2399,23 @@ struct ContentView: View {
         }
     }
     
+    /// The welcome text from default.md.
+    private static func welcomeMessage() -> String? {
+        guard let url = Bundle.main.url(forResource: "default", withExtension: "md") else { return nil }
+        return try? String(contentsOf: url, encoding: .utf8)
+    }
+
+    /// Settings › About › Welcome entry: a new entry holding the welcome text.
+    private func showWelcomeEntry() {
+        guard !isPreparingVideoRecording, !showingVideoRecording, !voiceRecorder.isRecording,
+              let welcomeMessage = Self.welcomeMessage() else { return }
+        createNewEntry()
+        guard let entry = entries.first(where: { $0.id == selectedEntryId }) else { return }
+        text = welcomeMessage
+        saveEntry(entry: entry)
+        updatePreviewText(for: entry)
+    }
+
     private func saveVideoEntry(from tempURL: URL, transcript: String?) {
         let replacementEntry = selectedEntryId
             .flatMap { id in entries.first(where: { $0.id == id }) }

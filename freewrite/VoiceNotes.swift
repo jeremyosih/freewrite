@@ -20,6 +20,9 @@ final class VoiceNoteRecorder: NSObject, AVAudioRecorderDelegate {
     static let meterBars = 18
 
     @ObservationIgnored private var recorder: AVAudioRecorder?
+    /// Used instead of `recorder` when a specific microphone is chosen in Settings › Recording.
+    @ObservationIgnored private var capture: AudioInputCapture?
+    @ObservationIgnored private var captureURL: URL?
     @ObservationIgnored private var meterTimer: Timer?
     /// Called when recording stops on its own (device lost, encoder error). Gets whatever audio
     /// was captured (nil if none) and a message for the user.
@@ -39,19 +42,27 @@ final class VoiceNoteRecorder: NSObject, AVAudioRecorderDelegate {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("voice-note-\(UUID().uuidString)")
             .appendingPathExtension("m4a")
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 44_100,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
-        ]
-        let recorder = try AVAudioRecorder(url: url, settings: settings)
-        recorder.delegate = self
-        recorder.isMeteringEnabled = true
-        guard recorder.record() else {
-            throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: "Couldn't start recording."])
+        if let device = AudioInputDevices.selectedCoreAudioDevice() {
+            // AVAudioRecorder can only use the system default input.
+            let capture = try AudioInputCapture(device: device)
+            try capture.start(recordingTo: url)
+            self.capture = capture
+            captureURL = url
+        } else {
+            let settings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 44_100,
+                AVNumberOfChannelsKey: 1,
+                AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+            ]
+            let recorder = try AVAudioRecorder(url: url, settings: settings)
+            recorder.delegate = self
+            recorder.isMeteringEnabled = true
+            guard recorder.record() else {
+                throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: "Couldn't start recording."])
+            }
+            self.recorder = recorder
         }
-        self.recorder = recorder
         elapsed = 0
         levels = Array(repeating: 0, count: Self.meterBars)
         isRecording = true
@@ -65,29 +76,47 @@ final class VoiceNoteRecorder: NSObject, AVAudioRecorderDelegate {
 
     /// Stops and returns the recorded file (nil if nothing usable was recorded).
     func stop() -> URL? {
+        if let capture, let url = captureURL {
+            let duration = capture.recordedDuration
+            finish()
+            let ok = capture.stop()
+            return Self.keep(url, if: ok && duration > 0.3)
+        }
         guard let recorder else { return nil }
         let url = recorder.url
         let duration = recorder.currentTime
         finish()
         recorder.stop()
-        guard duration > 0.3, FileManager.default.fileExists(atPath: url.path) else {
-            try? FileManager.default.removeItem(at: url)
-            return nil
-        }
-        return url
+        return Self.keep(url, if: duration > 0.3)
     }
 
     func discard() {
+        if let capture, let url = captureURL {
+            finish()
+            capture.stop()
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
         guard let recorder else { return }
         finish()
         recorder.stop()
         recorder.deleteRecording()
     }
 
+    private static func keep(_ url: URL, if usable: Bool) -> URL? {
+        guard usable, FileManager.default.fileExists(atPath: url.path) else {
+            try? FileManager.default.removeItem(at: url)
+            return nil
+        }
+        return url
+    }
+
     private func finish() {
         meterTimer?.invalidate()
         meterTimer = nil
         recorder = nil
+        capture = nil
+        captureURL = nil
         isRecording = false
     }
 
@@ -119,14 +148,35 @@ final class VoiceNoteRecorder: NSObject, AVAudioRecorderDelegate {
     }
 
     private func tick() {
-        guard let recorder else { return }
-        recorder.updateMeters()
-        elapsed = recorder.currentTime
-        // -50 dB and below reads as silence.
-        let power = recorder.averagePower(forChannel: 0)
-        let level = max(0, min(1, (power + 50) / 50))
+        let level: Float
+        if let capture {
+            guard capture.isRunning else {
+                // The engine stops when its device goes away or the configuration changes.
+                handleCaptureStop()
+                return
+            }
+            elapsed = capture.recordedDuration
+            level = capture.level
+        } else if let recorder {
+            recorder.updateMeters()
+            elapsed = recorder.currentTime
+            // -50 dB and below reads as silence.
+            let power = recorder.averagePower(forChannel: 0)
+            level = max(0, min(1, (power + 50) / 50))
+        } else {
+            return
+        }
         levels.removeFirst()
         levels.append(level)
+    }
+
+    private func handleCaptureStop() {
+        guard let capture, let url = captureURL else { return }
+        let captured = elapsed > 0.3
+        finish()
+        let ok = capture.stop()
+        let kept = Self.keep(url, if: captured && ok)
+        onUnexpectedStop?(kept, "Recording stopped: the microphone changed or was disconnected.")
     }
 }
 
