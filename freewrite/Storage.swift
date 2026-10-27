@@ -28,7 +28,8 @@ final class EntryStorage {
     @ObservationIgnored private var accessedURL: URL?
 
     var videosURL: URL { rootURL.appendingPathComponent(StorageTransfer.videosDirectoryName, isDirectory: true) }
-    var versionStore: EntryVersionStore { EntryVersionStore(root: rootURL) }
+    /// Carries the keys of open locked notes, so it can read and write them.
+    var versionStore: EntryVersionStore { EntryVersionStore(root: rootURL, cipher: NoteLockSession.shared.cipher) }
     var isUsingDefault: Bool { accessedURL == nil }
 
     static let defaultRootURL: URL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -215,8 +216,8 @@ final class EntryStorage {
     }
 }
 
-/// Copies or moves Freewrite's files (top-level `.md`/legacy `.mov` entries and the managed
-/// subfolders) between two entry folders. Pure file-system logic so it can be tested.
+/// Copies or moves Freewrite's files (top-level `.md`/`.fwlock`/legacy `.mov` entries and the
+/// managed subfolders) between two entry folders. Pure file-system logic so it can be tested.
 enum StorageTransfer {
     enum Mode: Sendable {
         case copy
@@ -404,10 +405,10 @@ enum StorageTransfer {
         (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
     }
 
-    /// Whether `filename` is a canonical entry file: `[UUID]-[yyyy-MM-dd-HH-mm-ss].md`, or a
-    /// legacy top-level video with the same name and `.mov`.
+    /// Whether `filename` is a canonical entry file: `[UUID]-[yyyy-MM-dd-HH-mm-ss].md`, a locked
+    /// entry with the same name and `.fwlock`, or a legacy top-level video with `.mov`.
     static func isEntryFilename(_ filename: String) -> Bool {
-        parseEntryFilename(filename) != nil || parseEntryFilename(filename, extension: "mov") != nil
+        ["md", LockedFileFormat.fileExtension, "mov"].contains { parseEntryFilename(filename, extension: $0) != nil }
     }
 
     /// UUID and timestamp of a canonical `[UUID]-[yyyy-MM-dd-HH-mm-ss].<extension>` filename

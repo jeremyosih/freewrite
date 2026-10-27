@@ -126,6 +126,32 @@ struct StorageTransferTests {
         #expect(StorageTransfer.parseEntryFilename(entry, extension: "mov") == nil)
     }
 
+    @Test func recognizesLockedEntryFilenames() {
+        let locked = "[6910BBDE-75FC-415C-ABB9-C76644B037B2]-[2026-02-20-08-01-04].fwlock"
+        #expect(StorageTransfer.isEntryFilename(locked))
+        #expect(StorageTransfer.parseEntryFilename(locked, extension: "fwlock")?.uuid == UUID(uuidString: "6910BBDE-75FC-415C-ABB9-C76644B037B2"))
+        #expect(StorageTransfer.parseEntryFilename(locked) == nil)
+        #expect(!StorageTransfer.isEntryFilename("diary.fwlock"))
+        #expect(!StorageTransfer.isEntryFilename("[not-a-uuid]-[2026-02-20-08-01-04].fwlock"))
+    }
+
+    @Test func lockedEntriesAreTransferred() throws {
+        let source = try makeSource()
+        let locked = "[BBBBBBBB-75FC-415C-ABB9-C76644B037B2]-[2026-02-22-08-01-04]"
+        try write("FWLK…", "\(locked).fwlock", in: source)
+        try write("FWLK…", "Entries/\(locked)/versions/v1.md.fwlock", in: source)
+        try write("{\"current\":\"v2\"}", "Entries/\(locked)/entry.json", in: source)
+        #expect(StorageTransfer.items(in: source).contains("\(locked).fwlock"))
+
+        let destination = try makeFolder()
+        let report = StorageTransfer.transfer(from: source, to: destination, mode: .move)
+        #expect(report.succeeded)
+        for path in ["\(locked).fwlock", "Entries/\(locked)/versions/v1.md.fwlock", "Entries/\(locked)/entry.json"] {
+            #expect(read(path, in: destination) != nil)
+            #expect(read(path, in: source) == nil)
+        }
+    }
+
     @Test func legacyTopLevelVideosAreTransferred() throws {
         let source = try makeSource()
         let destination = try makeFolder()

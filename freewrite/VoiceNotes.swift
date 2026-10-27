@@ -194,7 +194,9 @@ final class VoiceNotePlayer: NSObject, AVAudioPlayerDelegate {
 
     @ObservationIgnored private var player: AVAudioPlayer?
 
-    func toggle(_ url: URL) {
+    /// `load` supplies the bytes instead of reading `url` (a locked note's decrypted audio, kept
+    /// in memory only).
+    func toggle(_ url: URL, load: (() throws -> Data)? = nil) {
         if self.url == url, let player {
             if player.isPlaying {
                 player.pause()
@@ -206,7 +208,7 @@ final class VoiceNotePlayer: NSObject, AVAudioPlayerDelegate {
         }
         stop()
         do {
-            let player = try AVAudioPlayer(contentsOf: url)
+            let player = try load.map { try AVAudioPlayer(data: $0()) } ?? AVAudioPlayer(contentsOf: url)
             player.delegate = self
             self.player = player
             self.url = url

@@ -733,6 +733,10 @@ final class ReviewService: ObservableObject {
         bindings.append(binding)
         defer { bindings.removeAll { $0 === binding } }
         let versionStore = EntryVersionStore(root: binding.root)
+        // Locked notes are never sent to a provider (their files are encrypted at rest anyway).
+        guard !FileManager.default.fileExists(atPath: versionStore.lockedEntryFileURL(for: entryFilename).path) else {
+            throw ReviewError.failed("Locked notes aren't sent to reviewers. Unlock the note (make it plain) to review it.")
+        }
         guard FileManager.default.fileExists(atPath: versionStore.entryFileURL(for: entryFilename).path) else {
             throw ReviewError.failed(AnnotationStore.Failure.entryMissing.localizedDescription)
         }

@@ -15,9 +15,12 @@ struct PaletteDocument: Identifiable, Equatable, Sendable {
     let body: String
     /// A sealed version ("v1"); nil for the entry's current text.
     var version: String? = nil
+    /// Locked notes are listed by date only; their text is never read for the palette.
+    var isLocked = false
 
     /// First non-empty line, used as the row title.
     var title: String {
+        if isLocked { return "Locked note" }
         let firstLine = body.split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first(where: { !$0.isEmpty })
@@ -54,7 +57,12 @@ struct PaletteIndex: Sendable {
 
     init(_ documents: [PaletteDocument]) {
         self.documents = documents.map {
-            Document(document: $0, foldedTitle: Self.fold($0.title), foldedBody: Self.fold($0.body))
+            // A locked note can only be found by its title and date.
+            Document(
+                document: $0,
+                foldedTitle: Self.fold($0.title),
+                foldedBody: Self.fold($0.isLocked ? "\($0.title) \($0.date)" : $0.body)
+            )
         }
     }
 

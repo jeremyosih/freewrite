@@ -177,6 +177,7 @@ struct CommandPaletteView: View {
     private func icon(for item: PaletteItem) -> String {
         switch item {
         case .entry(let document, _):
+            if document.isLocked { return "lock.fill" }
             if document.isVideo { return "video" }
             return document.version == nil ? "doc.text" : "clock.arrow.circlepath"
         case .command: return "command"
