@@ -293,8 +293,10 @@ final class VoiceNotePlayer: NSObject, AVAudioPlayerDelegate {
 
     private func startTicking() {
         guard tickTimer == nil else { return }
-        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
+        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] timer in
+            // A player released without `stop()` mustn't leave its timer firing.
+            guard let self else { return timer.invalidate() }
+            MainActor.assumeIsolated { self.tick() }
         }
         RunLoop.main.add(timer, forMode: .common)
         tickTimer = timer

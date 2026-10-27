@@ -2260,6 +2260,7 @@ struct ContentView: View {
         .onDisappear {
             WritingWindow.openCount -= 1
             closeBarMenu()
+            voicePlayer.stop()  // also ends its 30 Hz tick timer
             if let scrollWheelMonitor {
                 NSEvent.removeMonitor(scrollWheelMonitor)
                 self.scrollWheelMonitor = nil
