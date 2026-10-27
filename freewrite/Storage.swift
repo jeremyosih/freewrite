@@ -43,7 +43,8 @@ final class EntryStorage {
             } catch {
                 print("Storage: falling back to default folder: \(error)")
                 UserDefaults.standard.removeObject(forKey: SettingsKey.storageBookmark)
-                unavailableFolderNotice = "Freewrite couldn't open your entries folder (\(error.localizedDescription)), so it's using the default folder for now. Choose the folder again in Settings › Storage."
+                let folder = URL.resourceValues(forKeys: [.pathKey], fromBookmarkData: bookmark)?.path.map { " “\($0)”" } ?? ""
+                unavailableFolderNotice = "Freewrite couldn't open your entries folder\(folder), so it's using the default folder for now. If the folder moved or its drive is disconnected, choose it again in Settings › Storage."
             }
         }
         ensureDirectories()

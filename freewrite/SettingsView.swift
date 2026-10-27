@@ -446,7 +446,7 @@ private struct StorageSettingsView: View {
         Form {
             Section {
                 LabeledContent("Entries Folder") {
-                    Text(storage.rootURL.path(percentEncoded: false))
+                    Text(storage.rootURL.path)
                         .lineLimit(3)
                         .truncationMode(.middle)
                         .textSelection(.enabled)
