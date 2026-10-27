@@ -274,7 +274,8 @@ class CameraManager: NSObject, ObservableObject {
 
             videoOutput.startRecording(to: url, recordingDelegate: self)
 
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
                 self.isRecording = true
                 self.recordingTime = 0
                 self.recordingTimer?.invalidate()
