@@ -3969,10 +3969,12 @@ extension ContentView {
             showStatus("Comments are for text entries.")
             return
         }
-        if focusMode && !showingComments {
+        // Decided first: leaving focus mode may restore the column, which a plain toggle would close again.
+        let shown = !showingComments
+        if focusMode && shown {
             exitFocusMode()
         }
-        setCommentsShown(!showingComments)
+        setCommentsShown(shown)
     }
 
     /// Slides the margin in or out; with Reduce Motion it just appears/disappears.
@@ -4007,6 +4009,9 @@ extension ContentView {
         }
         // Page notes first (oldest first), then passages in text order.
         let ordered = shown.filter(\.isPageNote) + shown.filter { !$0.isPageNote }.sorted { ($0.anchor?.start ?? 0) < ($1.anchor?.start ?? 0) }
+        // A resolved note whose passage was deleted keeps its old range; it goes with the page notes
+        // (above the first line) instead of vanishing, so it can still be read and reopened.
+        let textLength = (displayedText as NSString).length
         for note in ordered {
             let kind = note.resolvedKind
             var detail: String?
@@ -4021,7 +4026,7 @@ extension ContentView {
                 comment: note.comment,
                 detail: detail,
                 style: note.status == .resolved ? .resolved : .open,
-                isAnchored: !note.isPageNote))
+                isAnchored: !note.isPageNote && (note.anchor.map { NSMaxRange($0.range) <= textLength } ?? false)))
         }
         return cards
     }

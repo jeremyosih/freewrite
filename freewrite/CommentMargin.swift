@@ -32,6 +32,19 @@ final class CommentMarginModel {
     var activeId: String?
     /// Scrolls the editor to a note's passage (installed by the editor).
     @ObservationIgnored var reveal: ((String) -> Void)?
+    /// How far the cards are scrolled up inside the column, for cards pushed below its bottom
+    /// (e.g. many page notes on a short entry). Applied only up to `maxCardLift`.
+    var cardLiftRequest: CGFloat = 0
+    /// How far the lowest card reaches below the card area (0 when everything fits).
+    var maxCardLift: CGFloat = 0
+    /// The lift actually applied to every card (and its connector).
+    var cardLift: CGFloat { min(max(cardLiftRequest, 0), maxCardLift) }
+
+    /// How far the lowest card reaches below the card area for these card tops.
+    func overflow(of tops: [String: CGFloat]) -> CGFloat {
+        let bottom = tops.map { $0.value + (cardHeights[$0.key] ?? Self.estimatedCardHeight) }.max() ?? 0
+        return max(0, bottom + Self.cardInset - cardAreaFrame.height)
+    }
 
     /// The note drawn stronger: its card, highlight and line.
     var emphasizedId: String? { hoveredId ?? activeId }
@@ -64,6 +77,7 @@ final class CommentMarginModel {
         segments = [:]
         hoveredId = nil
         activeId = nil
+        cardLiftRequest = 0
     }
 }
 
@@ -124,6 +138,8 @@ struct CommentColumn: View {
 
     private var cardArea: some View {
         let tops = model.tops(for: cards)
+        let overflow = model.overflow(of: tops)
+        let lift = model.cardLift
         return ZStack(alignment: .topLeading) {
             if cards.isEmpty {
                 Text(emptyMessage)
@@ -152,7 +168,7 @@ struct CommentColumn: View {
                 )
                 .frame(width: CommentMarginModel.columnWidth - 2 * CommentMarginModel.cardInset)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { model.cardHeights[card.id] = $0 }
-                .offset(x: CommentMarginModel.cardInset, y: tops[card.id] ?? 0)
+                .offset(x: CommentMarginModel.cardInset, y: (tops[card.id] ?? 0) - lift)
                 // Passages that aren't laid out yet have no place: hidden until they are.
                 .opacity(tops[card.id] == nil ? 0 : 1)
             }
@@ -162,6 +178,31 @@ struct CommentColumn: View {
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: model.activeId)
         .clipped()
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { model.cardAreaFrame = $0 }
+        .onChange(of: overflow, initial: true) { _, overflow in model.maxCardLift = overflow }
+        // Cards that don't fit below the column's bottom can't be reached by scrolling the text
+        // (a short entry has nothing to scroll), so the column scrolls them up itself.
+        .onAppear { installCardScrollMonitor() }
+        .onDisappear { removeCardScrollMonitor() }
+    }
+
+    @State private var cardScrollMonitor: Any?
+
+    private func installCardScrollMonitor() {
+        guard cardScrollMonitor == nil else { return }
+        cardScrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [model] event in
+            guard model.maxCardLift > 0, let window = event.window, let content = window.contentView else { return event }
+            // SwiftUI's global frames are window coordinates with y from the top.
+            let point = CGPoint(x: event.locationInWindow.x, y: content.bounds.height - event.locationInWindow.y)
+            guard model.cardAreaFrame.contains(point) else { return event }
+            let delta = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 12
+            model.cardLiftRequest = min(max(model.cardLift - delta, 0), model.maxCardLift)
+            return nil
+        }
+    }
+
+    private func removeCardScrollMonitor() {
+        if let cardScrollMonitor { NSEvent.removeMonitor(cardScrollMonitor) }
+        cardScrollMonitor = nil
     }
 
     private var footer: some View {
@@ -351,12 +392,13 @@ struct CommentConnectorLayer: View {
         let scrollY = model.scrollY
         let textLeft = model.textLeft
         let emphasized = model.emphasizedId
+        let lift = model.cardLift
         GeometryReader { proxy in
             let origin = proxy.frame(in: .global).origin
             Canvas { context, _ in
                 for card in cards where card.isAnchored {
                     guard let top = tops[card.id], let segment = segments[card.id] else { continue }
-                    let cardY = area.minY + top + CommentMarginModel.connectorOffset
+                    let cardY = area.minY + top - lift + CommentMarginModel.connectorOffset
                     let highlight = segment.offsetBy(dx: editor.minX, dy: editor.minY - scrollY)
                     // Both ends must be visible: the card in its area, the passage in the editor.
                     guard cardY > area.minY, cardY < area.maxY,

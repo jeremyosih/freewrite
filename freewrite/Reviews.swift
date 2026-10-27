@@ -594,7 +594,8 @@ struct ReviewToolbox {
             "",
             "Earlier notes on this entry (\(all.count)). Before adding notes, check them against the text you're reviewing:",
             "- Your own open notes that the writing now addresses (fixed, rewritten, answered): call resolve_annotation with the id and a short reason.",
-            "- Don't repeat a note that's already there, resolved or dismissed (dismissed means the writer didn't want it).",
+            "- Don't repeat a note already on the version you're reviewing, or one that was resolved or dismissed (dismissed means the writer didn't want it).",
+            "- An open note on an earlier version that still applies to this text: add it again here (the writer only sees this version's notes), then resolve the old one if it's yours.",
             "- Other reviewers' notes are read-only context.",
         ]
         if !mine.isEmpty {
@@ -642,8 +643,9 @@ final class ReviewService: ObservableObject {
     - A thought about the whole version rather than one passage (its arc, what's missing, what to write next) is \
     a page note (add_page_note); use at most one or two.
     - The brief lists earlier notes. If one of yours is now addressed by the writing, resolve it \
-    (resolve_annotation) with a short reason instead of commenting again. Never repeat an existing, resolved \
-    or dismissed note. Other reviewers' notes are read-only.
+    (resolve_annotation) with a short reason instead of commenting again. Never repeat a note already on this \
+    version, or a resolved or dismissed one; an open note from an earlier version that still applies is added \
+    again on this version (the writer only sees this version's notes). Other reviewers' notes are read-only.
     - Use only the tools you're given. When you're done, call finish_review with a two or three sentence summary \
     addressed to the writer.
     """
