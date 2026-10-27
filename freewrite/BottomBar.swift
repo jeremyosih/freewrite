@@ -98,8 +98,10 @@ struct BottomBarLayout: Codable, Equatable {
     var left: [BottomBarItem] { slots.filter { $0.placement == .left }.map(\.item) }
     var right: [BottomBarItem] { slots.filter { $0.placement == .right }.map(\.item) }
 
-    /// Decodes a stored layout; items added in later versions are appended at their default side,
-    /// unknown or duplicate items are dropped.
+    /// Decodes a stored layout; unknown or duplicate items are dropped. Items added in later
+    /// versions get their default side and are inserted before the stored item that follows them
+    /// by default (Review lands before Backspace, History and Settings and Lock before Settings, never after
+    /// the gear).
     static func decode(_ json: String) -> BottomBarLayout {
         guard let data = json.data(using: .utf8),
               let stored = try? JSONDecoder().decode(StoredLayout.self, from: data) else {
@@ -113,12 +115,12 @@ struct BottomBarLayout: Codable, Equatable {
                   seen.insert(item).inserted else { continue }
             slots.append(Slot(item: item, placement: placement))
         }
-        for item in BottomBarItem.allCases where !seen.contains(item) {
+        let order = BottomBarItem.allCases
+        for (index, item) in order.enumerated() where !seen.contains(item) {
             let placement = BottomBarLayout.default.slots.first { $0.item == item }?.placement ?? .right
-            // Before the item that follows it by default (e.g. Lock goes before Settings).
-            let later = BottomBarItem.allCases.drop(while: { $0 != item }).dropFirst()
-            let index = later.lazy.compactMap { next in slots.firstIndex { $0.item == next } }.first ?? slots.endIndex
-            slots.insert(Slot(item: item, placement: placement), at: index)
+            let followers = Set(order[(index + 1)...])
+            let position = slots.firstIndex { followers.contains($0.item) } ?? slots.endIndex
+            slots.insert(Slot(item: item, placement: placement), at: position)
         }
         return BottomBarLayout(slots: slots)
     }
