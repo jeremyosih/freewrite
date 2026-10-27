@@ -58,6 +58,16 @@ extension AnnotationKind {
         }
     }
 
+    /// The highlight of the note whose card is hovered or active in the comment margin.
+    var activeHighlightColor: NSColor {
+        let base = nsColor
+        let (light, dark): (CGFloat, CGFloat) = self == .grammar ? (0.30, 0.42) : (0.42, 0.55)
+        return NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            return base.withAlphaComponent(isDark ? dark : light)
+        }
+    }
+
     /// Grammar notes get a squiggly underline, like a spelling mark; the others only a tint.
     var underlineColor: NSColor? {
         self == .grammar ? nsColor : nil

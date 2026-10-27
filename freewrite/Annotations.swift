@@ -6,8 +6,11 @@
 //  `Entries/[UUID]-[date]/annotations.json` (an array, oldest first):
 //
 //      { "id", "entryId", "versionId", "reviewerId", "runId",
-//        "anchor": { "quote", "prefix", "suffix", "start", "end" },
-//        "comment", "kind", "status": "active|orphaned|dismissed", "createdAt" }
+//        "anchor": { "quote", "prefix", "suffix", "start", "end" },   (absent: a page note)
+//        "comment", "kind", "status": "active|orphaned|resolved|dismissed", "createdAt",
+//        "resolution": { "by": "user|reviewer", "reviewerId", "runId", "reason", "at" } }
+//
+//  Decoding is tolerant: older files have no "resolution", and an unknown status reads as active.
 //
 //  Anchors combine a text quote (with ~32 characters of context either side) and
 //  UTF-16 offsets, like the W3C TextQuote + TextPosition selectors. Sealed versions
@@ -35,8 +38,33 @@ struct Annotation: Codable, Equatable, Identifiable, Sendable {
         case active
         /// The quote can't be found in the current text any more (kept, hidden).
         case orphaned
+        /// Addressed: marked by the writer, or by a reviewer whose new review found it fixed.
+        /// Kept (and shown under "Resolved") so it isn't raised again; can be reopened.
+        case resolved
         /// Dismissed by the user (kept so a reviewer doesn't say it again).
         case dismissed
+
+        /// Statuses written by a newer version of the app read as active instead of failing the file.
+        init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = Status(rawValue: raw) ?? .active
+        }
+    }
+
+    /// Who resolved a note, when and why.
+    struct Resolution: Codable, Equatable, Sendable {
+        enum Actor: String, Codable, Sendable {
+            case user
+            case reviewer
+        }
+
+        var by: Actor
+        /// The reviewer (and its run) that resolved it, when `by` is `.reviewer`.
+        var reviewerId: String? = nil
+        var runId: String? = nil
+        /// A reviewer's short reason ("fixed in v3").
+        var reason: String? = nil
+        var at: Date
     }
 
     let id: String
@@ -44,14 +72,67 @@ struct Annotation: Codable, Equatable, Identifiable, Sendable {
     let versionId: String
     let reviewerId: String
     let runId: String
-    var anchor: AnnotationAnchor
+    /// Where the note sits in the text; nil for a page note about the version as a whole.
+    var anchor: AnnotationAnchor?
     var comment: String
     var kind: String
     var status: Status
     let createdAt: Date
+    var resolution: Resolution? = nil
 
     /// `kind` as one of the fixed kinds (older files may hold other words).
     var resolvedKind: AnnotationKind { AnnotationKind.resolve(kind) }
+
+    var isPageNote: Bool { anchor == nil }
+
+    /// Still asks for attention: not resolved or dismissed (an orphaned note may come back).
+    var isOpen: Bool { status == .active || status == .orphaned }
+
+    // MARK: Status changes
+
+    /// Marks an open note resolved. False (nothing changes) for resolved or dismissed notes.
+    @discardableResult
+    mutating func resolve(_ resolution: Resolution) -> Bool {
+        guard isOpen else { return false }
+        status = .resolved
+        self.resolution = resolution
+        return true
+    }
+
+    /// Reopens a resolved note: active again (re-anchoring orphans it if its quote is gone).
+    @discardableResult
+    mutating func reopen() -> Bool {
+        guard status == .resolved else { return false }
+        status = .active
+        resolution = nil
+        return true
+    }
+
+    /// Dismisses any note that isn't dismissed yet.
+    @discardableResult
+    mutating func dismiss() -> Bool {
+        guard status != .dismissed else { return false }
+        status = .dismissed
+        return true
+    }
+}
+
+extension Annotation {
+    /// Tolerant of older and hand-edited files: no resolution, a missing kind or status.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        entryId = try container.decodeIfPresent(String.self, forKey: .entryId) ?? ""
+        versionId = try container.decode(String.self, forKey: .versionId)
+        reviewerId = try container.decodeIfPresent(String.self, forKey: .reviewerId) ?? ""
+        runId = try container.decodeIfPresent(String.self, forKey: .runId) ?? ""
+        anchor = try container.decodeIfPresent(AnnotationAnchor.self, forKey: .anchor)
+        comment = try container.decodeIfPresent(String.self, forKey: .comment) ?? ""
+        kind = try container.decodeIfPresent(String.self, forKey: .kind) ?? AnnotationKind.insight.rawValue
+        status = try container.decodeIfPresent(Status.self, forKey: .status) ?? .active
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(timeIntervalSince1970: 0)
+        resolution = try? container.decodeIfPresent(Resolution.self, forKey: .resolution)
+    }
 }
 
 /// What a note is about. Each kind has its own highlight colour in the editor; reviewers
@@ -204,16 +285,33 @@ struct AnnotationStore: Sendable {
 
     /// The newest saved summary of a version, if any (text after the heading).
     func latestSummary(versionId: String, entryFilename: String) -> String? {
+        latestReviews(entryFilename: entryFilename)[versionId]?.summary
+    }
+
+    /// A reviewer's closing summary, as saved in `reviews/`.
+    struct ReviewSummary: Equatable, Sendable {
+        let reviewerName: String
+        let summary: String
+    }
+
+    /// The newest summary of each version, by version id.
+    func latestReviews(entryFilename: String) -> [String: ReviewSummary] {
         let directory = versionStore.entryDirectory(for: entryFilename)
             .appendingPathComponent(Self.reviewsDirectoryName, isDirectory: true)
         let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        var result: [String: ReviewSummary] = [:]
+        // Newest first (the names start with a timestamp), so the first summary of a version wins.
         for url in files.filter({ $0.pathExtension == "md" }).sorted(by: { $0.lastPathComponent > $1.lastPathComponent }) {
             guard let text = try? String(contentsOf: url, encoding: .utf8),
-                  let heading = text.split(separator: "\n", maxSplits: 1).first,
-                  heading.hasSuffix(" on \(versionId)") else { continue }
-            return text.dropFirst(heading.count).trimmingCharacters(in: .whitespacesAndNewlines)
+                  let heading = text.split(separator: "\n", maxSplits: 1).first, heading.hasPrefix("# "),
+                  let on = heading.range(of: " on ", options: .backwards) else { continue }
+            let versionId = String(heading[on.upperBound...])
+            guard result[versionId] == nil else { continue }
+            let name = String(heading[heading.index(heading.startIndex, offsetBy: 2)..<on.lowerBound])
+            result[versionId] = ReviewSummary(
+                reviewerName: name, summary: text.dropFirst(heading.count).trimmingCharacters(in: .whitespacesAndNewlines))
         }
-        return nil
+        return result
     }
 
     private static var encoder: JSONEncoder {
@@ -320,20 +418,38 @@ enum AnnotationAnchoring {
         }
     }
 
-    /// Re-anchors `annotations` of `versionId` against `text`: found ones become active
-    /// (offsets updated), missing ones orphaned. Dismissed notes and other versions are untouched.
+    /// Re-anchors `annotations` of `versionId` against `text`: found ones get their offsets
+    /// updated (an orphan becomes active again), open ones whose quote is gone are orphaned.
+    /// Resolved notes keep their status (their offsets still follow the quote when it's there).
+    /// Dismissed notes, page notes and other versions are untouched.
     static func reanchor(_ annotations: [Annotation], versionId: String, in text: String) -> [Annotation] {
         annotations.map { annotation in
-            guard annotation.versionId == versionId, annotation.status != .dismissed else { return annotation }
+            guard annotation.versionId == versionId, annotation.status != .dismissed,
+                  let anchor = annotation.anchor else { return annotation }
             var updated = annotation
-            if let range = resolve(annotation.anchor, in: text) {
-                updated.anchor.start = range.location
-                updated.anchor.end = NSMaxRange(range)
-                updated.status = .active
-            } else {
+            if let range = resolve(anchor, in: text) {
+                updated.anchor?.start = range.location
+                updated.anchor?.end = NSMaxRange(range)
+                if updated.status == .orphaned { updated.status = .active }
+            } else if updated.status == .active {
                 updated.status = .orphaned
             }
             return updated
+        }
+    }
+
+    /// Copies anchors (and active/orphaned status) the editor moved into `stored`, matching by
+    /// id, so notes a review added or resolved meanwhile stay as they are on disk. A note the
+    /// file has as resolved or dismissed keeps that status; only its offsets follow the text.
+    static func mergeAnchors(_ updated: [Annotation], into stored: inout [Annotation]) {
+        let byId = Dictionary(updated.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for index in stored.indices {
+            guard stored[index].status != .dismissed, let mine = byId[stored[index].id],
+                  stored[index].anchor != nil, let anchor = mine.anchor else { continue }
+            stored[index].anchor = anchor
+            if stored[index].isOpen, mine.isOpen {
+                stored[index].status = mine.status
+            }
         }
     }
 
@@ -343,13 +459,13 @@ enum AnnotationAnchoring {
     static func followEdit(_ annotations: [Annotation], versionId: String, from old: String, to new: String) -> [Annotation] {
         guard old != new, let edit = edit(from: old, to: new) else { return annotations }
         let shifted = annotations.map { annotation -> Annotation in
-            guard annotation.versionId == versionId, annotation.status != .dismissed,
-                  let range = EditorHighlight.adjust(annotation.anchor.range, for: edit.range, changeInLength: edit.delta) else {
+            guard annotation.versionId == versionId, annotation.status != .dismissed, let anchor = annotation.anchor,
+                  let range = EditorHighlight.adjust(anchor.range, for: edit.range, changeInLength: edit.delta) else {
                 return annotation
             }
             var moved = annotation
-            moved.anchor.start = range.location
-            moved.anchor.end = NSMaxRange(range)
+            moved.anchor?.start = range.location
+            moved.anchor?.end = NSMaxRange(range)
             return moved
         }
         return reanchor(shifted, versionId: versionId, in: new)

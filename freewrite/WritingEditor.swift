@@ -29,6 +29,15 @@ struct WritingEditor: NSViewRepresentable {
     var verticalInset: CGFloat = 0
     /// The "/" template menu, opened by typing "/" at the start of a line or after a space.
     var templateMenu: TemplateMenuController? = nil
+    /// Passages with a card in the comment margin (UTF-16 ranges by note id); their positions
+    /// are published to `commentMargin` as the text scrolls, wraps and changes.
+    var commentAnchors: [String: NSRange] = [:]
+    var commentMargin: CommentMarginModel? = nil
+    /// The hover popover with a highlight's comment; off while the comment margin shows them.
+    var showsHoverComments = true
+    /// The highlight under the pointer (nil when it leaves), and a click on one.
+    var onHoverHighlight: ((String?) -> Void)? = nil
+    var onClickHighlight: ((String) -> Void)? = nil
 
     /// `.custom`-style lookup: PostScript name, then family name, then the system font.
     static func font(named name: String, size: CGFloat) -> NSFont {
@@ -79,6 +88,10 @@ struct WritingEditor: NSViewRepresentable {
         coordinator.onDismissHighlight = onDismissHighlight
         coordinator.focusKey = focusKey
         coordinator.canTakeFocus = canTakeFocus
+        coordinator.setCommentMargin(commentMargin, anchors: commentAnchors)
+        coordinator.showsHoverComments = showsHoverComments
+        coordinator.onHoverHighlight = onHoverHighlight
+        coordinator.onClickHighlight = onClickHighlight
         textView.focusWhenAttached = canTakeFocus
         return scrollView
     }
@@ -91,6 +104,12 @@ struct WritingEditor: NSViewRepresentable {
         }
         coordinator.binding = $text
         coordinator.onDismissHighlight = onDismissHighlight
+        coordinator.onHoverHighlight = onHoverHighlight
+        coordinator.onClickHighlight = onClickHighlight
+        if coordinator.showsHoverComments != showsHoverComments {
+            coordinator.showsHoverComments = showsHoverComments
+            coordinator.closePopover()
+        }
         coordinator.setEditable(isEditable)
         coordinator.setTemplateMenu(templateMenu)
 
@@ -107,6 +126,7 @@ struct WritingEditor: NSViewRepresentable {
         if highlights != coordinator.sourceHighlights {
             coordinator.setHighlights(highlights)
         }
+        coordinator.setCommentMargin(commentMargin, anchors: commentAnchors)
         let regainedFocus = canTakeFocus && !coordinator.canTakeFocus
         coordinator.canTakeFocus = canTakeFocus
         if focusKey != coordinator.focusKey || regainedFocus {
@@ -132,11 +152,21 @@ struct WritingEditor: NSViewRepresentable {
         var focusKey: AnyHashable?
         var canTakeFocus = true
         var onDismissHighlight: ((String) -> Void)?
+        var showsHoverComments = true
+        var onHoverHighlight: ((String?) -> Void)?
+        var onClickHighlight: ((String) -> Void)?
+        private var hoveredHighlightId: String?
+        /// The comment margin and the passages it shows, as last passed in and as moved by edits since.
+        private weak var commentMargin: CommentMarginModel?
+        private var sourceCommentAnchors: [String: NSRange] = [:]
+        private var commentAnchors: [String: NSRange] = [:]
+        private var geometryUpdateScheduled = false
         /// Highlights as last passed in, and as currently drawn (moved along with edits).
         private(set) var sourceHighlights: [EditorHighlight] = []
         private var drawnHighlights: [EditorHighlight] = []
 
         private weak var textView: WritingTextView?
+        private weak var scrollView: NSScrollView?
         private let undoManager = UndoManager()
         private(set) weak var templateMenu: TemplateMenuController?
         /// Where a "/" that may open the template menu is being typed (set just before the edit).
@@ -146,6 +176,7 @@ struct WritingEditor: NSViewRepresentable {
 
         func attach(to textView: WritingTextView, in scrollView: NSScrollView) {
             self.textView = textView
+            self.scrollView = scrollView
             textView.delegate = self
             textView.textStorage?.delegate = self
             textView.onHover = { [weak self] point in
@@ -156,6 +187,12 @@ struct WritingEditor: NSViewRepresentable {
             }
             textView.underlineSegments = { [weak self] in
                 self?.underlineSegments() ?? []
+            }
+            textView.onClick = { [weak self] point in
+                self?.click(at: point)
+            }
+            textView.onResize = { [weak self] in
+                self?.scheduleCommentGeometry()
             }
             scrollView.contentView.postsBoundsChangedNotifications = true
             NotificationCenter.default.addObserver(
@@ -179,6 +216,8 @@ struct WritingEditor: NSViewRepresentable {
             undoManager.removeAllActions()
             drawnHighlights = sourceHighlights
             drawHighlights()
+            commentAnchors = sourceCommentAnchors
+            scheduleCommentGeometry()
         }
 
         func textDidChange(_ notification: Notification) {
@@ -338,6 +377,12 @@ struct WritingEditor: NSViewRepresentable {
             MainActor.assumeIsolated {
                 guard let theme else { return }
                 MarkdownRenderer.style(storage, in: editedRange, theme: theme)
+                if !commentAnchors.isEmpty {
+                    commentAnchors = commentAnchors.compactMapValues {
+                        EditorHighlight.adjust($0, for: editedRange, changeInLength: delta)
+                    }
+                    scheduleCommentGeometry()
+                }
                 guard !drawnHighlights.isEmpty else { return }
                 drawnHighlights = EditorHighlight.adjust(drawnHighlights, for: editedRange, changeInLength: delta)
                 closePopover()
@@ -359,6 +404,7 @@ struct WritingEditor: NSViewRepresentable {
             MarkdownRenderer.style(storage, in: NSRange(location: 0, length: storage.length), theme: theme)
             storage.endEditing()
             popover?.appearance = theme.appearance
+            scheduleCommentGeometry()
         }
 
         // MARK: Focus
@@ -421,11 +467,101 @@ struct WritingEditor: NSViewRepresentable {
         // MARK: Hover
 
         private func hover(at point: NSPoint?) {
-            guard let point, let (highlight, rect) = highlight(at: point) else {
+            let found = point.flatMap { highlight(at: $0) }
+            let id = found?.0.id
+            if id != hoveredHighlightId {
+                hoveredHighlightId = id
+                onHoverHighlight?(id)
+            }
+            guard showsHoverComments, let (highlight, rect) = found else {
                 closePopover()
                 return
             }
             showPopover(for: highlight, at: rect)
+        }
+
+        /// A plain click (no selection made) on a highlight.
+        private func click(at point: NSPoint) {
+            guard let textView, textView.selectedRange().length == 0,
+                  let (highlight, _) = highlight(at: point) else { return }
+            onClickHighlight?(highlight.id)
+        }
+
+        // MARK: Comment margin
+
+        func setCommentMargin(_ margin: CommentMarginModel?, anchors: [String: NSRange]) {
+            if margin !== commentMargin {
+                commentMargin = margin
+                margin?.reveal = { [weak self] id in self?.reveal(id) }
+                scheduleCommentGeometry()
+            }
+            guard anchors != sourceCommentAnchors else { return }
+            sourceCommentAnchors = anchors
+            commentAnchors = anchors
+            scheduleCommentGeometry()
+        }
+
+        /// Recomputes passage positions once the current layout pass is over.
+        private func scheduleCommentGeometry() {
+            guard commentMargin != nil, !geometryUpdateScheduled else { return }
+            geometryUpdateScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                geometryUpdateScheduled = false
+                publishCommentGeometry()
+            }
+        }
+
+        /// Where each passage's first line is (document coordinates), plus the scroll offset and
+        /// text edges, for the comment margin. Layout is forced up to each passage so cards for
+        /// text below the fold still get their real place.
+        private func publishCommentGeometry() {
+            guard let margin = commentMargin, let textView, let layoutManager = textView.textLayoutManager else { return }
+            let origin = textView.textContainerOrigin
+            var segments: [String: CGRect] = [:]
+            for (id, range) in commentAnchors {
+                guard let textRange = textRange(for: range) else { continue }
+                layoutManager.ensureLayout(for: textRange)
+                var first: CGRect?
+                layoutManager.enumerateTextSegments(in: textRange, type: .highlight, options: []) { _, frame, _, _ in
+                    first = frame
+                    return false
+                }
+                if let first {
+                    segments[id] = first.offsetBy(dx: origin.x, dy: origin.y)
+                }
+            }
+            if margin.segments != segments { margin.segments = segments }
+            let padding = textView.textContainer?.lineFragmentPadding ?? 0
+            if margin.textLeft != origin.x + padding { margin.textLeft = origin.x + padding }
+            if margin.textTop != origin.y { margin.textTop = origin.y }
+            publishScrollOffset()
+        }
+
+        private func publishScrollOffset() {
+            guard let margin = commentMargin, let scrollView else { return }
+            let y = scrollView.contentView.bounds.origin.y
+            if margin.scrollY != y { margin.scrollY = y }
+        }
+
+        /// Scrolls a note's passage into the middle of the view, flashes it and puts the caret
+        /// after it. It isn't selected: the next key would replace the writer's text.
+        private func reveal(_ id: String) {
+            guard let textView, let range = commentAnchors[id], NSMaxRange(range) <= (textView.textStorage?.length ?? 0) else { return }
+            if let segment = commentMargin?.segments[id], let scrollView {
+                let visible = scrollView.contentView.bounds
+                if segment.minY < visible.minY + 40 || segment.maxY > visible.maxY - 40 {
+                    let maxY = max(textView.frame.height - visible.height, 0)
+                    let y = min(max(segment.midY - visible.height / 2, 0), maxY)
+                    scrollView.contentView.scroll(to: NSPoint(x: 0, y: y))
+                    scrollView.reflectScrolledClipView(scrollView.contentView)
+                }
+            } else {
+                textView.scrollRangeToVisible(range)
+            }
+            textView.setSelectedRange(NSRange(location: NSMaxRange(range), length: 0))
+            textView.showFindIndicator(for: range)
+            focus()
         }
 
         /// The highlight under `point` (text view coordinates) and the rect of its line segment there.
@@ -504,6 +640,7 @@ struct WritingEditor: NSViewRepresentable {
 
         @objc private func scrolled() {
             closePopover()
+            publishScrollOffset()
             // The menu follows its line.
             if templateMenu?.isOpen == true {
                 refreshTemplateMenu()
@@ -537,6 +674,10 @@ struct EditorTheme: Equatable {
 
 final class WritingTextView: NSTextView {
     var onHover: ((NSPoint?) -> Void)?
+    /// A mouse click that ended without dragging, at this point (text view coordinates).
+    var onClick: ((NSPoint) -> Void)?
+    /// The view was resized (the text rewraps).
+    var onResize: (() -> Void)?
     /// An extra context-menu item for the point clicked (e.g. dismissing the highlight there).
     var highlightMenuItem: ((NSPoint) -> NSMenuItem?)?
     /// Become first responder as soon as the view lands in a window.
@@ -572,6 +713,16 @@ final class WritingTextView: NSTextView {
         // Rewrapped lines move the squiggles.
         if underlineOverlay.superview === self {
             underlineOverlay.needsDisplay = true
+        }
+        onResize?()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        // Tracks the drag until the mouse goes up.
+        super.mouseDown(with: event)
+        if event.clickCount == 1 {
+            onClick?(point)
         }
     }
 

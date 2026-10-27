@@ -184,6 +184,15 @@ struct ContentView: View {
     @State private var annotationSaveTask: Task<Void, Never>? = nil
     /// Anchors moved by typing, not written yet (saved after a 1 s pause or by `flushAnnotationAnchors`).
     @State private var pendingAnchors: PendingAnchors? = nil
+    /// The latest review summary of each version of the selected entry (shown atop the margin).
+    @State private var reviewSummaries: [String: AnnotationStore.ReviewSummary] = [:]
+    /// The comment margin (CommentMargin.swift) on the left of the text: shown, with resolved
+    /// notes, its geometry, and whether it was open when focus mode started.
+    @AppStorage(SettingsKey.showComments) private var showingComments = false
+    @State private var showsResolvedComments = false
+    @State private var commentMargin = CommentMarginModel()
+    @State private var commentsBeforeFocus = false
+    @State private var isHoveringComments = false
     /// The floating bar menu that's open (BarMenu.swift), its keyboard highlight and key monitor.
     @State private var openBarMenu: BarMenuKind? = nil
     @State private var barMenuHighlight: String? = nil
@@ -1143,6 +1152,8 @@ struct ContentView: View {
             showWelcomeEntry()
         case .toggleFocusMode:
             toggleFocusMode()
+        case .toggleComments:
+            toggleComments()
         case .insertTemplate:
             insertTemplate()
         }
@@ -1927,6 +1938,16 @@ struct ContentView: View {
         let isViewingVideoEntry = currentVideoURL != nil
         
         HStack(spacing: 0) {
+            // Comment margin, on the left: History has the right side, and every line starts at
+            // the text's left edge, so the connectors stay short and never cross the text.
+            if showsCommentColumn {
+                commentColumn
+                    .transition(reduceMotion ? .opacity : .move(edge: .leading))
+                Divider()
+                    .ignoresSafeArea(edges: .top)
+                    .opacity(commentChromeOpacity)
+            }
+
             // Main content
             ZStack {
                 Color(colorScheme == .light ? .white : .black)
@@ -1963,8 +1984,18 @@ struct ContentView: View {
                         canTakeFocus: !showingCommandPalette,
                         isEditable: viewedVersion == nil,
                         verticalInset: noteTopInset,
-                        templateMenu: templateMenu
+                        templateMenu: templateMenu,
+                        commentAnchors: commentAnchors,
+                        commentMargin: commentMargin,
+                        showsHoverComments: !showsCommentColumn,
+                        onHoverHighlight: { id in
+                            if showsCommentColumn { commentMargin.hoveredId = id }
+                        },
+                        onClickHighlight: { id in
+                            if showsCommentColumn { commentMargin.activeId = id }
+                        }
                     )
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { commentMargin.editorFrame = $0 }
                     // Text fades out under the thin top and bottom margins as it scrolls.
                     .mask {
                         VStack(spacing: 0) {
@@ -2261,6 +2292,14 @@ struct ContentView: View {
                 .background(Color(colorScheme == .light ? .white : NSColor.black).ignoresSafeArea(edges: .top))
             }
         }
+        .overlay {
+            if showsCommentColumn {
+                CommentConnectorLayer(model: commentMargin, cards: commentCards)
+                    .opacity(commentChromeOpacity)
+                    .ignoresSafeArea()
+            }
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: showsCommentColumn)
         .overlayPreferenceValue(BarMenuAnchorKey.self) { anchors in
             barMenuOverlay(anchors)
         }
@@ -2421,6 +2460,9 @@ struct ContentView: View {
         .onChange(of: annotationContext) {
             reloadAnnotations()
         }
+        .onChange(of: commentVersionKey) {
+            commentMargin.reset()
+        }
         .onReceive(reviews.annotationsChanged) { filename in
             if filename == selectedTextEntry?.filename {
                 reloadAnnotations()
@@ -2537,6 +2579,10 @@ struct ContentView: View {
         if showingSidebar {
             setSidebarShown(false)
         }
+        commentsBeforeFocus = showingComments
+        if showingComments {
+            setCommentsShown(false)
+        }
         setWindowButtonsHidden(true)
     }
 
@@ -2550,6 +2596,10 @@ struct ContentView: View {
             setSidebarShown(true)
         }
         sidebarBeforeFocus = false
+        if commentsBeforeFocus && !showingComments {
+            setCommentsShown(true)
+        }
+        commentsBeforeFocus = false
         setWindowButtonsHidden(false)
     }
 
@@ -3672,19 +3722,26 @@ extension ContentView {
         [selectedTextEntry?.filename ?? "", entryManifest?.current ?? "", storage.rootURL.path].joined(separator: "|")
     }
 
-    /// Active notes of the version on screen, coloured per kind of note.
+    private func reviewerName(_ id: String) -> String {
+        reviewerProfiles.first(where: { $0.id == id })?.name ?? id.capitalized
+    }
+
+    /// Active notes of the version on screen, coloured per kind of note (stronger for the
+    /// note whose card is hovered or active in the comment margin).
     private var editorHighlights: [EditorHighlight] {
         guard let version = displayedVersion, annotationsEntryId == selectedEntryId, !annotations.isEmpty else { return [] }
         let profiles = Dictionary(reviewerProfiles.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let emphasized = showsCommentColumn ? commentMargin.emphasizedId : nil
         return annotations
             .filter { $0.versionId == version.id && $0.status == .active }
-            .map { annotation in
+            .compactMap { annotation in
+                guard let anchor = annotation.anchor else { return nil }
                 let kind = annotation.resolvedKind
                 let reviewer = profiles[annotation.reviewerId]?.name ?? annotation.reviewerId.capitalized
                 return EditorHighlight(
                     id: annotation.id,
-                    range: annotation.anchor.range,
-                    color: kind.highlightColor,
+                    range: anchor.range,
+                    color: annotation.id == emphasized ? kind.activeHighlightColor : kind.highlightColor,
                     comment: annotation.comment,
                     title: "\(kind.title) · \(reviewer)",
                     titleColor: kind.nsColor,
@@ -3701,6 +3758,7 @@ extension ContentView {
         guard let entry = selectedTextEntry else {
             annotations = []
             annotationsEntryId = nil
+            reviewSummaries = [:]
             return
         }
         var loaded: [Annotation]
@@ -3720,6 +3778,7 @@ extension ContentView {
         annotations = loaded
         annotationsEntryId = entry.id
         annotationsBaseText = text
+        reviewSummaries = annotationStore.latestReviews(entryFilename: entry.filename)
     }
 
     /// Moves the current version's notes along with typing (and orphans those whose quote is gone).
@@ -3728,7 +3787,7 @@ extension ContentView {
               let current = entryManifest?.current else { return }
         let old = annotationsBaseText
         annotationsBaseText = text
-        guard annotations.contains(where: { $0.versionId == current && $0.status != .dismissed }) else { return }
+        guard annotations.contains(where: { $0.versionId == current && $0.status != .dismissed && $0.anchor != nil }) else { return }
         let moved = AnnotationAnchoring.followEdit(annotations, versionId: current, from: old, to: text)
         guard moved != annotations else { return }
         annotations = moved
@@ -3754,14 +3813,9 @@ extension ContentView {
 
     /// Writes anchors/statuses into the file, merging by id so notes a running review added meanwhile stay.
     private func persistAnchors(_ updated: [Annotation], entryFilename: String, in store: AnnotationStore? = nil) {
-        let byId = Dictionary(updated.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         do {
             try (store ?? annotationStore).update(for: entryFilename) { stored in
-                for index in stored.indices {
-                    guard stored[index].status != .dismissed, let mine = byId[stored[index].id] else { continue }
-                    stored[index].anchor = mine.anchor
-                    stored[index].status = mine.status
-                }
+                AnnotationAnchoring.mergeAnchors(updated, into: &stored)
             }
         } catch {
             print("Reviews: couldn't save annotation anchors: \(error)")
@@ -3769,18 +3823,36 @@ extension ContentView {
     }
 
     private func dismissAnnotation(id: String) {
+        changeAnnotation(id: id, failure: "Couldn't dismiss the note") { $0.dismiss() }
+    }
+
+    /// Resolved by the writer (card button, context menu).
+    private func resolveAnnotation(id: String) {
+        changeAnnotation(id: id, failure: "Couldn't resolve the note") {
+            $0.resolve(Annotation.Resolution(by: .user, at: Date()))
+        }
+    }
+
+    private func reopenAnnotation(id: String) {
+        changeAnnotation(id: id, failure: "Couldn't reopen the note") { $0.reopen() }
+    }
+
+    /// Changes one note in `annotations.json` and reloads (a reopened note is re-anchored to the
+    /// text, so it comes back orphaned if its quote is gone).
+    private func changeAnnotation(id: String, failure: String, _ change: @escaping (inout Annotation) -> Bool) {
         guard let entry = selectedTextEntry else { return }
+        flushAnnotationAnchors()
         do {
             try annotationStore.update(for: entry.filename) { stored in
                 if let index = stored.firstIndex(where: { $0.id == id }) {
-                    stored[index].status = .dismissed
+                    _ = change(&stored[index])
                 }
             }
-            if let index = annotations.firstIndex(where: { $0.id == id }) {
-                annotations[index].status = .dismissed
-            }
+            if commentMargin.activeId == id { commentMargin.activeId = nil }
+            if commentMargin.hoveredId == id { commentMargin.hoveredId = nil }
+            reloadAnnotations()
         } catch {
-            showStatus("Couldn't dismiss the note: \(error.localizedDescription)")
+            showStatus("\(failure): \(error.localizedDescription)")
         }
     }
 
@@ -3845,8 +3917,11 @@ extension ContentView {
             for profile in profiles {
                 do {
                     let outcome = try await reviews.review(entryFilename: entry.filename, entryId: entry.id, versionId: versionId, profile: profile)
-                    let notes = outcome.added == 1 ? "1 note" : "\(outcome.added) notes"
-                    showStatus(outcome.added == 0 ? "\(profile.name) had nothing to add." : "\(profile.name) left \(notes) on \(versionId).", for: entry.id)
+                    showStatus(Self.outcomeMessage(outcome), for: entry.id)
+                    // New notes open the margin (not in focus mode, and only for the entry on screen).
+                    if outcome.added > 0, selectedEntryId == entry.id, !focusMode, !showingComments {
+                        setCommentsShown(true)
+                    }
                 } catch ReviewError.stopped(let reason) {
                     // The rest of the queue would run on an entry that's gone or in another folder.
                     if reason == .folderChanged {
@@ -3858,6 +3933,140 @@ extension ContentView {
                 }
             }
         }
+    }
+
+    private static func outcomeMessage(_ outcome: ReviewOutcome) -> String {
+        let name = outcome.reviewerName
+        let notes = outcome.added == 1 ? "1 note" : "\(outcome.added) notes"
+        let resolved = outcome.resolved == 1 ? "1 earlier note" : "\(outcome.resolved) earlier notes"
+        switch (outcome.added, outcome.resolved) {
+        case (0, 0): return "\(name) had nothing to add."
+        case (_, 0): return "\(name) left \(notes) on \(outcome.versionId)."
+        case (0, _): return "\(name) resolved \(resolved)."
+        default: return "\(name) left \(notes) on \(outcome.versionId) and resolved \(resolved)."
+        }
+    }
+
+    // MARK: Comment margin
+
+    /// The margin shows for a text entry on screen (not a video, not a closed locked note).
+    private var showsCommentColumn: Bool {
+        showingComments && selectedTextEntry != nil && !isSelectedNoteClosed
+    }
+
+    /// Like the bar, the margin fades while the timer runs (back on hover).
+    private var commentChromeOpacity: Double {
+        isHoveringComments ? 1 : bottomNavOpacity
+    }
+
+    /// Changes when another entry or version is on screen: the active card is forgotten then.
+    private var commentVersionKey: String {
+        "\(selectedEntryId?.uuidString ?? "")|\(displayedVersion?.id ?? "")"
+    }
+
+    private func toggleComments() {
+        guard selectedTextEntry != nil, !isSelectedNoteClosed else {
+            showStatus("Comments are for text entries.")
+            return
+        }
+        if focusMode && !showingComments {
+            exitFocusMode()
+        }
+        setCommentsShown(!showingComments)
+    }
+
+    /// Slides the margin in or out; with Reduce Motion it just appears/disappears.
+    private func setCommentsShown(_ shown: Bool) {
+        var transaction = Transaction(animation: reduceMotion ? nil : .easeInOut(duration: 0.2))
+        transaction.disablesAnimations = reduceMotion
+        withTransaction(transaction) {
+            showingComments = shown
+        }
+        if !shown {
+            commentMargin.reset()
+        }
+    }
+
+    /// Notes of the version on screen that get a card: open passage notes and page notes (plus
+    /// resolved ones when shown), after the review's summary.
+    private var commentCards: [CommentCardItem] {
+        guard let version = displayedVersion, annotationsEntryId == selectedEntryId else { return [] }
+        var cards: [CommentCardItem] = []
+        if let summary = reviewSummaries[version.id] {
+            cards.append(CommentCardItem(
+                id: "summary-\(version.id)", title: "Summary · \(summary.reviewerName)", color: .secondaryLabelColor,
+                comment: summary.summary, style: .summary, isAnchored: false))
+        }
+        let notes = annotations.filter { $0.versionId == version.id }
+        let shown = notes.filter { note in
+            switch note.status {
+            case .active: return true
+            case .resolved: return showsResolvedComments
+            case .orphaned, .dismissed: return false
+            }
+        }
+        // Page notes first (oldest first), then passages in text order.
+        let ordered = shown.filter(\.isPageNote) + shown.filter { !$0.isPageNote }.sorted { ($0.anchor?.start ?? 0) < ($1.anchor?.start ?? 0) }
+        for note in ordered {
+            let kind = note.resolvedKind
+            var detail: String?
+            if note.status == .resolved, let resolution = note.resolution {
+                let who = resolution.by == .user ? "you" : reviewerName(resolution.reviewerId ?? note.reviewerId)
+                detail = "Resolved by \(who)" + (resolution.reason.map { ": \($0)" } ?? "")
+            }
+            cards.append(CommentCardItem(
+                id: note.id,
+                title: "\(note.isPageNote ? "Page · " : "")\(kind.title) · \(reviewerName(note.reviewerId))",
+                color: kind.nsColor,
+                comment: note.comment,
+                detail: detail,
+                style: note.status == .resolved ? .resolved : .open,
+                isAnchored: !note.isPageNote))
+        }
+        return cards
+    }
+
+    /// Passages the margin needs positions for (empty while it's closed: no layout work then).
+    private var commentAnchors: [String: NSRange] {
+        guard showsCommentColumn else { return [:] }
+        var anchors: [String: NSRange] = [:]
+        for card in commentCards where card.isAnchored {
+            if let anchor = annotations.first(where: { $0.id == card.id })?.anchor {
+                anchors[card.id] = anchor.range
+            }
+        }
+        return anchors
+    }
+
+    private var commentColumn: some View {
+        let version = displayedVersion?.id ?? "v1"
+        let resolvedCount = annotations.filter { $0.versionId == displayedVersion?.id && $0.status == .resolved }.count
+        return CommentColumn(
+            model: commentMargin,
+            cards: commentCards,
+            isDark: colorScheme == .dark,
+            reduceMotion: reduceMotion,
+            resolvedCount: resolvedCount,
+            showsResolved: showsResolvedComments,
+            emptyMessage: runningReview != nil
+                ? "\(runningReview?.reviewerName ?? "A reviewer") is reading \(version)…"
+                : "No comments on \(version).\nAsk a reviewer with Review with… (✦).",
+            footerHeight: navHeight,
+            onSelect: { id in
+                commentMargin.activeId = id
+                commentMargin.reveal?(id)
+            },
+            onResolve: resolveAnnotation(id:),
+            onReopen: reopenAnnotation(id:),
+            onDismiss: dismissAnnotation(id:),
+            onToggleResolved: { showsResolvedComments.toggle() },
+            onClose: { setCommentsShown(false) }
+        )
+        .opacity(commentChromeOpacity)
+        .onHover { isHoveringComments = $0 }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Comments")
+        .accessibilityIdentifier("commentMargin")
     }
 
     // MARK: Views
@@ -3928,7 +4137,13 @@ extension ContentView {
                 ) { clearReview() },
             ]))
         }
+        let openCount = versionNotes.filter { $0.status == .active }.count
         sections.append(BarMenuSection(id: "settings", actions: [
+            BarMenuAction(
+                id: "toggleCommentsButton",
+                title: showingComments ? "Hide Comments" : (openCount > 0 ? "Show Comments (\(openCount))" : "Show Comments"),
+                detail: ShortcutStore.shortcut(for: .toggleComments, in: shortcutsJSON)?.displayString
+            ) { toggleComments() },
             BarMenuAction(id: "reviewersAndModelsButton", title: "Reviewers & Models…") {
                 openReviewerSettings()
             },
