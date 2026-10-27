@@ -1206,7 +1206,8 @@ struct ContentView: View {
         showingVersionMenu = false
         voicePlayer.stop()
         if let entry, entry.entryType == .text {
-            entryManifest = try? versionStore.savedManifest(for: entry.filename)
+            // Every text entry has at least v1, so the version menu (and New Version) is always there.
+            entryManifest = versionStore.manifest(for: entry.filename)
         } else {
             entryManifest = nil
         }
@@ -1298,6 +1299,14 @@ struct ContentView: View {
             }
             do {
                 voicePlayer.stop()
+                voiceRecorder.onUnexpectedStop = { url, reason in
+                    if let url {
+                        saveVoiceNote(from: url)
+                        showStatus("\(reason) What was recorded is saved.")
+                    } else {
+                        showStatus(reason)
+                    }
+                }
                 try voiceRecorder.start()
                 withAnimation(.easeOut(duration: 0.2)) {
                     bottomNavOpacity = 1.0
@@ -1376,13 +1385,30 @@ struct ContentView: View {
         let engine = TranscriptionEngine.current
         let progress = engine == .hex ? "Transcribing with Hex…" : "Transcribing…"
         transcriptionStatuses[entryId] = progress
+        // The folder the recording was saved in. The entries folder may change while this runs.
+        let origin = versionStore
         Task {
             do {
                 let transcript = try await engine.transcribe(fileURL: attachment.audioURL)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                // Resolve paths now: the entries folder may have changed while transcribing.
-                let store = versionStore
-                try store.saveTranscript(transcript, forAudio: attachment.audioPath, entryFilename: entryFilename)
+                // The transcript goes next to the recording wherever it is now: still in the old
+                // folder ("Just Switch"), moved, or copied (then both copies get it).
+                let current = versionStore
+                let candidates = current.root == origin.root ? [origin] : [current, origin]
+                let holders = candidates.filter { store in
+                    FileManager.default.fileExists(atPath: store.url(forRelativePath: attachment.audioPath, entryFilename: entryFilename).path)
+                }
+                guard let store = holders.first else {
+                    showStatus("The voice note was moved before its transcript finished.", for: entryId)
+                    return
+                }
+                for holder in holders {
+                    do {
+                        try holder.saveTranscript(transcript, forAudio: attachment.audioPath, entryFilename: entryFilename)
+                    } catch {
+                        print("Voice note: couldn't save transcript in \(holder.root.path): \(error)")
+                    }
+                }
                 guard !transcript.isEmpty else {
                     showStatus("No speech found in the voice note.", for: entryId)
                     return
@@ -1391,13 +1417,13 @@ struct ContentView: View {
                     showStatus("Transcript saved with \(attachment.versionId).", for: entryId)
                     return
                 }
-                if selectedEntryId == entryId && currentVideoURL == nil {
+                if store.root == current.root && selectedEntryId == entryId && currentVideoURL == nil {
                     text = appending(transcript, to: text)  // autosaved like typing
                 } else {
                     let url = store.entryFileURL(for: entryFilename)
                     let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
                     try appending(transcript, to: existing).write(to: url, atomically: true, encoding: .utf8)
-                    if let entry = entries.first(where: { $0.id == entryId }) {
+                    if store.root == current.root, let entry = entries.first(where: { $0.id == entryId }) {
                         updatePreviewText(for: entry)
                     }
                 }
@@ -1417,8 +1443,13 @@ struct ContentView: View {
     }
 
     private func audioURL(for version: EntryVersion) -> URL? {
-        guard let entry = selectedTextEntry, let audio = version.audio else { return nil }
-        return versionStore.url(forRelativePath: audio, entryFilename: entry.filename)
+        audioURLs(for: version).last
+    }
+
+    /// Every voice note recorded for a version, oldest first.
+    private func audioURLs(for version: EntryVersion) -> [URL] {
+        guard let entry = selectedTextEntry else { return [] }
+        return version.allAudio.map { versionStore.url(forRelativePath: $0, entryFilename: entry.filename) }
     }
 
     var timerButtonTitle: String {
@@ -1955,8 +1986,8 @@ struct ContentView: View {
 
     @ViewBuilder
     private func textEntryStatus(textColor: Color, textHoverColor: Color) -> some View {
-        if viewedVersion == nil, let current = entryManifest?.currentVersion, let url = audioURL(for: current) {
-            playVoiceNoteButton(url: url, textColor: textColor, textHoverColor: textHoverColor)
+        if viewedVersion == nil, let current = entryManifest?.currentVersion, !audioURLs(for: current).isEmpty {
+            playVoiceNotes(audioURLs(for: current), textColor: textColor, textHoverColor: textHoverColor)
         }
         if let transcriptionStatus {
             Text(transcriptionStatus)
@@ -2039,10 +2070,10 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 Text("Viewing \(version.id) · read-only")
                     .foregroundColor(textColor)
-                if let url = audioURL(for: version) {
+                if !audioURLs(for: version).isEmpty {
                     Text("•")
                         .foregroundColor(.gray)
-                    playVoiceNoteButton(url: url, textColor: textColor, textHoverColor: textHoverColor)
+                    playVoiceNotes(audioURLs(for: version), textColor: textColor, textHoverColor: textHoverColor)
                 }
                 Text("•")
                     .foregroundColor(.gray)
@@ -2064,6 +2095,40 @@ struct ContentView: View {
             .font(.system(size: 13))
             .padding(.top, 12)
             Spacer()
+        }
+    }
+
+    /// One play button, or a menu of every voice note when a version has more than one.
+    @ViewBuilder
+    private func playVoiceNotes(_ urls: [URL], textColor: Color, textHoverColor: Color) -> some View {
+        if urls.count == 1, let url = urls.first {
+            playVoiceNoteButton(url: url, textColor: textColor, textHoverColor: textHoverColor)
+        } else {
+            let playing = urls.firstIndex { voicePlayer.url == $0 && voicePlayer.isPlaying }
+            Menu {
+                ForEach(Array(urls.enumerated()), id: \.element) { index, url in
+                    Button(voicePlayer.url == url && voicePlayer.isPlaying ? "Pause voice note \(index + 1)" : "Play voice note \(index + 1)") {
+                        voicePlayer.toggle(url)
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: playing == nil ? "play.fill" : "pause.fill")
+                        .font(.system(size: 10))
+                    Text(playing.map { "Voice note \($0 + 1) of \(urls.count)" } ?? "\(urls.count) voice notes")
+                        .font(.system(size: 13))
+                }
+                .foregroundColor(isHoveringPlayVoiceNote ? textHoverColor : textColor)
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityIdentifier("playVoiceNotesMenu")
+            .onHover { hovering in
+                isHoveringPlayVoiceNote = hovering
+                hoverCursor(hovering)
+            }
         }
     }
 
@@ -2341,7 +2406,7 @@ struct ContentView: View {
                 guard entry.entryType == .text else { return nil }
                 guard text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
                 // An entry with versions or a voice note keeps them; the video gets its own entry.
-                guard entryManifest == nil else { return nil }
+                guard entryManifest?.isInteresting != true else { return nil }
                 return entry
             }
 
