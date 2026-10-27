@@ -1056,7 +1056,12 @@ struct ContentView: View {
             }
         case .command(let command):
             handle(command)
-        case .review(let reviewer, _):
+        case .review(let reviewer, let versionId):
+            // The row names a version; a menu command (New Version) may have changed it meanwhile.
+            guard displayedVersion?.id == versionId else {
+                showStatus("This entry is now on \(displayedVersion?.id ?? "another version"). Open ⌘K again to review it.")
+                return
+            }
             if let profile = reviewerProfiles.first(where: { $0.id == reviewer.id }) {
                 startReview(profile)
             }
@@ -1069,12 +1074,13 @@ struct ContentView: View {
         }
     }
 
-    /// Review actions for the version on screen; reviewers only when a review could start now.
+    /// Review actions for the version on screen; reviewers only when a review could start now
+    /// (never for locked notes, which reviewers can't read, like the bar's Review item).
     private var paletteReviewActions: PaletteReviewActions {
-        guard selectedTextEntry != nil, !isSelectedNoteClosed, let version = displayedVersion else { return .none }
+        guard let entry = selectedTextEntry, !isSelectedNoteClosed, let version = displayedVersion else { return .none }
         return PaletteReviewActions(
             versionId: version.id,
-            reviewers: runningReview == nil ? reviewerProfiles.map { .init(id: $0.id, name: $0.name) } : [],
+            reviewers: runningReview == nil && !entry.isLocked ? reviewerProfiles.map { .init(id: $0.id, name: $0.name) } : [],
             noteCount: annotations.filter { $0.versionId == version.id && $0.status != .dismissed }.count
         )
     }
@@ -3527,7 +3533,9 @@ extension ContentView {
 
     private func openReviewerSettings() {
         UserDefaults.standard.set("agents", forKey: "settingsPane")
-        if SettingsWindow.window == nil {
+        if let window = SettingsWindow.window {
+            window.makeKeyAndOrderFront(nil)
+        } else {
             SettingsWindow.toggle(openSettings)
         }
     }
