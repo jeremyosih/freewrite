@@ -275,6 +275,7 @@ struct WritingEditor: NSViewRepresentable {
             let location = start + expanded.caret
             textView.setSelectedRange(NSRange(location: location, length: 0))
             textView.scrollRangeToVisible(NSRange(location: location, length: 0))
+            menu.didInsertHandler?(template)
         }
 
         /// Insert Template…: opens the menu at the caret, no "/" typed. False when the editor

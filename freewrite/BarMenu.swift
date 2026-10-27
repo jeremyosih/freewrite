@@ -2,7 +2,7 @@
 //  BarMenu.swift
 //  freewrite
 //
-//  Floating menus of the bottom bar (versions, Review with…, voice notes, permissions, overflow):
+//  Floating menus of the bottom bar (versions, font, Review with…, voice notes, permissions, overflow):
 //  a rounded card above the control that opened it, no arrow. ContentView draws the open menu
 //  in one overlay over the writing area, positioned from anchor preferences of the bar controls,
 //  so nothing is clipped by the bar and there is no separate window to keep in sync.
@@ -13,6 +13,7 @@ import SwiftUI
 /// Which menu is open. Only one at a time.
 enum BarMenuKind: Hashable {
     case versions
+    case font
     case review
     case voiceNotes
     case videoPermission

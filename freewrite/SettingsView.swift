@@ -20,22 +20,6 @@ enum SettingsKey {
     static let storageBookmark = "storageFolderBookmark"
 }
 
-enum WritingFont {
-    static let presets: [(label: String, name: String)] = [
-        ("Lato", "Lato-Regular"),
-        ("Arial", "Arial"),
-        ("System", ".AppleSystemUIFont"),
-        ("Serif", "Times New Roman"),
-    ]
-    static let defaultName = "Lato-Regular"
-    static let sizes: [Double] = [16, 18, 20, 22, 24, 26]
-    static let defaultSize: Double = 18
-
-    static func displayName(for name: String) -> String {
-        presets.first(where: { $0.name == name })?.label ?? name
-    }
-}
-
 // MARK: - Shortcuts
 
 enum AppCommand: String, CaseIterable, Identifiable {
@@ -52,6 +36,9 @@ enum AppCommand: String, CaseIterable, Identifiable {
     case toggleTheme
     case increaseFontSize
     case decreaseFontSize
+    case chooseFont
+    case randomFont
+    case useDefaultFont
     case showWelcomeEntry
     case insertTemplate
 
@@ -72,6 +59,9 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .toggleTheme: return "Toggle Light/Dark"
         case .increaseFontSize: return "Bigger Text"
         case .decreaseFontSize: return "Smaller Text"
+        case .chooseFont: return "Font…"
+        case .randomFont: return "Random Font"
+        case .useDefaultFont: return "Use Default Font & Size"
         case .showWelcomeEntry: return "Show Welcome Entry"
         case .insertTemplate: return "Insert Template…"
         }
@@ -92,7 +82,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .toggleTheme: return KeyShortcut(key: "l", modifiers: [.command, .shift])
         case .increaseFontSize: return KeyShortcut(key: "=", modifiers: [.command])
         case .decreaseFontSize: return KeyShortcut(key: "-", modifiers: [.command])
-        case .showWelcomeEntry, .insertTemplate: return nil
+        case .showWelcomeEntry, .insertTemplate, .chooseFont, .randomFont, .useDefaultFont: return nil
         }
     }
 
@@ -270,6 +260,9 @@ struct FreewriteCommands: Commands {
             Divider()
             button(for: .increaseFontSize)
             button(for: .decreaseFontSize)
+            button(for: .chooseFont)
+            button(for: .randomFont)
+            button(for: .useDefaultFont)
             Divider()
             button(for: .recordVideo)
             button(for: .recordVoiceNote)
@@ -475,7 +468,7 @@ private struct GeneralSettingsView: View {
 
     var body: some View {
         Form {
-            Section("Text") {
+            Section("Text of New Pages") {
                 Picker(selection: $fontName) {
                     ForEach(WritingFont.presets, id: \.name) { preset in
                         Text(preset.label).tag(preset.name)
@@ -490,7 +483,7 @@ private struct GeneralSettingsView: View {
                     }
                 } label: {
                     Text("Font")
-                    Text("The typeface of the writing page")
+                    Text("Default for new pages; a page you change keeps its own")
                 }
 
                 Picker(selection: $fontSize) {
@@ -499,7 +492,7 @@ private struct GeneralSettingsView: View {
                     }
                 } label: {
                     Text("Size")
-                    Text("Bigger Text and Smaller Text in the Write menu change it too")
+                    Text("Default for new pages; Bigger and Smaller Text change the page you're on")
                 }
 
                 Text("The quick brown fox jumps over the lazy dog.")

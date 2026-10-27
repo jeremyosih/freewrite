@@ -102,8 +102,9 @@ struct ContentView: View {
     @State private var text: String = ""  // Remove initial welcome text since we'll handle it in createNewEntry
     
     @State private var isFullscreen = false
-    @AppStorage(SettingsKey.fontName) private var selectedFont: String = WritingFont.defaultName
-    @AppStorage(SettingsKey.fontSize) private var fontSizeSetting: Double = WritingFont.defaultSize
+    /// Font and size of new pages (Settings › General); a page can have its own (`pageWriting`).
+    @AppStorage(SettingsKey.fontName) private var defaultFontName: String = WritingFont.defaultName
+    @AppStorage(SettingsKey.fontSize) private var defaultFontSize: Double = WritingFont.defaultSize
     @AppStorage(SettingsKey.colorScheme) private var colorSchemeSetting: String = "light"
     @AppStorage(SettingsKey.sessionMinutes) private var sessionMinutes: Int = 15
     @State private var keyDownMonitor: Any?
@@ -163,6 +164,8 @@ struct ContentView: View {
     @State private var viewedVersion: EntryVersion? = nil
     @State private var viewedVersionText = ""
     @State private var isHoveringVersion = false
+    @State private var isHoveringFontSize = false
+    @State private var isHoveringFont = false
     @State private var isHoveringBackToCurrent = false
     @State private var isHoveringPlayVoiceNote = false
     @State private var voiceRecorder = VoiceNoteRecorder()
@@ -210,6 +213,13 @@ struct ContentView: View {
     let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     let entryHeight: CGFloat = 40
     
+    /// The selected text entry's own font and size (from its manifest; every version shares them).
+    private var pageWriting: WritingSettings? {
+        currentVideoURL == nil ? entryManifest?.writing : nil
+    }
+    /// The font and size the page is written in: its own, else the defaults.
+    private var selectedFont: String { pageWriting?.font ?? defaultFontName }
+    private var fontSizeSetting: Double { pageWriting?.size ?? defaultFontSize }
     private var fontSize: CGFloat { CGFloat(fontSizeSetting) }
     private var colorScheme: ColorScheme { colorSchemeSetting == "dark" ? .dark : .light }
     let placeholderOptions = [
@@ -717,7 +727,7 @@ struct ContentView: View {
         // Writing-only controls.
         case .backspace, .lock: return currentVideoURL == nil
         // Nothing of a locked note is shown (or sent to a reviewer) until it's opened.
-        case .versions, .recordVoiceNote: return currentVideoURL == nil && !isSelectedNoteClosed
+        case .versions, .recordVoiceNote, .fontSize, .font: return currentVideoURL == nil && !isSelectedNoteClosed
         // Locked notes are never sent to a reviewer, open or not.
         case .review: return currentVideoURL == nil && selectedTextEntry?.isLocked != true
         default: return true
@@ -835,6 +845,10 @@ struct ContentView: View {
             voiceNoteButton(textColor: textColor, textHoverColor: textHoverColor)
         case .review:
             reviewButton(textColor: textColor, textHoverColor: textHoverColor)
+        case .fontSize:
+            fontSizeButton(textColor: textColor, textHoverColor: textHoverColor)
+        case .font:
+            fontButton(textColor: textColor, textHoverColor: textHoverColor)
         case .timer:
                 Button(timerButtonTitle) {
                     let now = Date()
@@ -1141,10 +1155,18 @@ struct ContentView: View {
         case .toggleTheme:
             colorSchemeSetting = colorScheme == .light ? "dark" : "light"
         case .increaseFontSize, .decreaseFontSize:
-            let sizes = WritingFont.sizes
-            let index = sizes.firstIndex(of: fontSizeSetting) ?? sizes.firstIndex(of: WritingFont.defaultSize) ?? 0
-            let step = command == .increaseFontSize ? 1 : -1
-            fontSizeSetting = sizes[min(max(index + step, 0), sizes.count - 1)]
+            let size = WritingFont.size(fontSizeSetting, steppedBy: command == .increaseFontSize ? 1 : -1)
+            updatePageWriting { $0.size = size }
+        case .chooseFont:
+            guard canChangePageWriting else {
+                showStatus(pageWritingUnavailableMessage)
+                return
+            }
+            showBarMenu(.font)
+        case .randomFont:
+            chooseRandomFont()
+        case .useDefaultFont:
+            updatePageWriting { $0 = WritingSettings() }
         case .showWelcomeEntry:
             showWelcomeEntry()
         case .insertTemplate:
@@ -1160,6 +1182,7 @@ struct ContentView: View {
             return
         }
         templateMenu.editTemplatesHandler = { openTemplateSettings() }
+        templateMenu.didInsertHandler = { applyTemplateWriting($0) }
         // After the palette (if it was open) has given the editor its focus back.
         DispatchQueue.main.async {
             if !templateMenu.openAtCaret() {
@@ -2289,6 +2312,7 @@ struct ContentView: View {
         .onAppear {
             WritingWindow.openCount += 1
             templateMenu.editTemplatesHandler = { openTemplateSettings() }
+        templateMenu.didInsertHandler = { applyTemplateWriting($0) }
             installTimerScrollMonitor()
             showingSidebar = false  // Hide sidebar by default
             timeRemaining = sessionMinutes * 60
@@ -2474,6 +2498,137 @@ struct ContentView: View {
             }
             .barMenuAnchor(.item(.versions))
         }
+    }
+
+    // MARK: Page font and size
+
+    /// Whether the selected page's font and size can change now: a text entry that isn't a
+    /// closed locked note. (Viewing a sealed version is fine: every version shares them.)
+    private var canChangePageWriting: Bool {
+        selectedTextEntry != nil && !isSelectedNoteClosed && !showingVideoRecording
+    }
+
+    private var pageWritingUnavailableMessage: String {
+        isSelectedNoteClosed ? "Open this note to change its font." : "Font and size are for text entries."
+    }
+
+    /// Changes the selected page's own font/size and stores it in its manifest. Other pages and
+    /// the defaults (Settings › General) are untouched.
+    private func updatePageWriting(_ change: (inout WritingSettings) -> Void) {
+        guard canChangePageWriting, let entry = selectedTextEntry else {
+            showStatus(pageWritingUnavailableMessage)
+            return
+        }
+        var writing = pageWriting ?? WritingSettings()
+        change(&writing)
+        writing = WritingSettings(font: writing.font, size: writing.size)
+        do {
+            if let manifest = try versionStore.setWritingSettings(writing, for: entry.filename) {
+                applyManifest(manifest, toEntry: entry.id)
+            } else {
+                entryManifest?.writing = nil
+            }
+        } catch {
+            showStatus("Couldn't change this page's font: \(error.localizedDescription)")
+        }
+    }
+
+    /// The bar's "18px": the next size, back to the smallest after the largest (like Farza's).
+    private func cycleFontSize() {
+        let size = WritingFont.nextSize(after: fontSizeSetting)
+        updatePageWriting { $0.size = size }
+    }
+
+    private func setPageFont(_ name: String) {
+        updatePageWriting { $0.font = name }
+    }
+
+    /// Any installed family other than the presets and the current font.
+    private func chooseRandomFont() {
+        let presets = Set(WritingFont.presets.map(\.name))
+        let current = selectedFont
+        guard let random = NSFontManager.shared.availableFontFamilies
+            .filter({ !presets.contains($0) && $0 != current })
+            .randomElement() else { return }
+        setPageFont(random)
+    }
+
+    /// A template with a font/size switches the page to it once it's inserted.
+    private func applyTemplateWriting(_ template: WritingTemplate) {
+        guard let writing = template.writing else { return }
+        updatePageWriting { $0 = $0.overlaid(with: writing) }
+    }
+
+    /// "18px" (bottom bar item): click for the next size.
+    private func fontSizeButton(textColor: Color, textHoverColor: Color) -> some View {
+        Button(action: cycleFontSize) {
+            Text("\(Int(fontSizeSetting))px")
+                .font(.system(size: 13).monospacedDigit())
+                .foregroundColor(isHoveringFontSize ? textHoverColor : textColor)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Text size")
+        .accessibilityValue("\(Int(fontSizeSetting)) points")
+        .accessibilityHint("Changes the size of this page's text")
+        .accessibilityIdentifier("fontSizeButton")
+        .help("Text size of this page")
+        .onHover { hovering in
+            isHoveringFontSize = hovering
+            hoverCursor(hovering)
+        }
+    }
+
+    /// "Lato ⌃" (bottom bar item): opens the font menu for this page.
+    private func fontButton(textColor: Color, textHoverColor: Color) -> some View {
+        Button(action: { toggleBarMenu(.font) }) {
+            HStack(spacing: 3) {
+                Text(WritingFont.displayName(for: selectedFont))
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 140, alignment: .leading)
+                    .fixedSize(horizontal: true, vertical: false)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9))
+            }
+            .foregroundColor(isHoveringFont || openBarMenu == .font ? textHoverColor : textColor)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Font")
+        .accessibilityValue(WritingFont.displayName(for: selectedFont))
+        .accessibilityIdentifier("fontButton")
+        .help("Font of this page")
+        .onHover { hovering in
+            isHoveringFont = hovering
+            hoverCursor(hovering)
+        }
+        .barMenuAnchor(.item(.font))
+    }
+
+    /// Lato · Arial · System · Serif, the page's other font if it has one, Random, and back to
+    /// the defaults.
+    private var fontMenuContent: BarMenuContent {
+        let current = selectedFont
+        var fonts = WritingFont.presets.map { preset in
+            BarMenuAction(id: "fontRow-\(preset.label)", title: preset.label, isChecked: preset.name == current) {
+                setPageFont(preset.name)
+            }
+        }
+        if !WritingFont.presets.contains(where: { $0.name == current }) {
+            fonts.append(BarMenuAction(id: "fontRow-current", title: current, isChecked: true) {})
+        }
+        fonts.append(BarMenuAction(id: "fontRow-random", title: "Random", trailingSymbol: "shuffle") {
+            chooseRandomFont()
+        })
+        let defaults = "\(WritingFont.displayName(for: defaultFontName)) \(Int(defaultFontSize))px"
+        return BarMenuContent(width: 240, sections: [
+            BarMenuSection(id: "fonts", header: "Font of this page", actions: fonts),
+            BarMenuSection(id: "defaults", actions: [
+                BarMenuAction(id: "useDefaultFontButton", title: "Use Default", detail: defaults, isEnabled: pageWriting != nil) {
+                    updatePageWriting { $0 = WritingSettings() }
+                },
+            ]),
+        ])
     }
 
     /// Voice notes of the version on screen (the current one, or a sealed one being viewed).
@@ -3168,7 +3323,8 @@ struct ContentView: View {
             // Show save dialog
             if savePanel.runModal() == .OK, let url = savePanel.url {
                 // Create PDF data
-                if let pdfData = createPDFFromText(text: entryContent) {
+                let writing = entry.id == selectedEntryId ? pageWriting : versionStore.writingSettings(for: entry.filename)
+                if let pdfData = createPDFFromText(text: entryContent, writing: writing) {
                     try pdfData.write(to: url)
                     print("Successfully exported PDF to: \(url.path)")
                 }
@@ -3178,7 +3334,9 @@ struct ContentView: View {
         }
     }
     
-    private func createPDFFromText(text: String) -> Data? {
+    private func createPDFFromText(text: String, writing: WritingSettings?) -> Data? {
+        let fontName = writing?.font ?? defaultFontName
+        let fontSize = CGFloat(writing?.size ?? defaultFontSize)
         // Letter size page dimensions
         let pageWidth: CGFloat = 612.0  // 8.5 x 72
         let pageHeight: CGFloat = 792.0 // 11 x 72
@@ -3197,9 +3355,9 @@ struct ContentView: View {
         
         // Configure text formatting attributes
         let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.lineSpacing = lineHeight
-        
-        let font = NSFont(name: selectedFont, size: fontSize) ?? .systemFont(ofSize: fontSize)
+        let font = NSFont(name: fontName, size: fontSize) ?? .systemFont(ofSize: fontSize)
+        paragraphStyle.lineSpacing = (fontSize * 1.5) - getLineHeight(font: font)
+
         let textAttributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: NSColor(red: 0.20, green: 0.20, blue: 0.20, alpha: 1.0),
@@ -3641,6 +3799,9 @@ extension ContentView {
                     ) { createNewVersion() },
                 ]),
             ])
+        case .font:
+            guard canChangePageWriting else { return nil }
+            return fontMenuContent
         case .review:
             guard selectedTextEntry != nil else { return nil }
             return reviewMenuContent
@@ -3700,6 +3861,7 @@ extension ContentView {
     private func barMenuAnchors(_ kind: BarMenuKind) -> [BarMenuAnchor] {
         switch kind {
         case .versions: return [.item(.versions), .overflow]
+        case .font: return [.item(.font), .overflow]
         case .review: return [.item(.review), .overflow]
         case .voiceNotes: return [.voiceNotes]
         case .videoPermission: return [.item(.recordVideo), .overflow]
@@ -3817,7 +3979,7 @@ extension ContentView {
     /// Bar items that move into "…" first when the bar is too narrow. Settings and the version
     /// menu always stay.
     private static let overflowOrder: [BottomBarItem] = [
-        .fullscreen, .backspace, .newEntry, .timer, .recordVideo, .recordVoiceNote, .review, .lock, .history,
+        .fullscreen, .backspace, .newEntry, .fontSize, .font, .timer, .recordVideo, .recordVoiceNote, .review, .lock, .history,
     ]
 
     private func overflowAction(for item: BottomBarItem) -> BarMenuAction {
@@ -3831,7 +3993,8 @@ extension ContentView {
         case .history: .toggleHistory
         case .versions: .newVersion
         case .lock: .toggleNoteLock
-        case .fullscreen, .settings: nil
+        case .font: .chooseFont
+        case .fontSize, .fullscreen, .settings: nil
         }
         let title = switch item {
         case .timer: timerIsRunning ? "Pause Timer" : "Start Timer"
@@ -3840,9 +4003,14 @@ extension ContentView {
         case .fullscreen: isFullscreen ? "Exit Fullscreen" : "Fullscreen"
         case .history: showingSidebar ? "Hide History" : "Show History"
         case .lock: selectedTextEntry?.isLocked == true ? "Unlock Note…" : "Lock Note"
+        case .fontSize: "Text Size"
+        case .font: "Font…"
         default: item.title
         }
-        let detail = item == .timer ? timerButtonTitle : command.flatMap { ShortcutStore.shortcut(for: $0, in: shortcutsJSON)?.displayString }
+        let detail: String? = item == .timer ? timerButtonTitle
+            : item == .fontSize ? "\(Int(fontSizeSetting))px"
+            : item == .font ? WritingFont.displayName(for: selectedFont)
+            : command.flatMap { ShortcutStore.shortcut(for: $0, in: shortcutsJSON)?.displayString }
         let isEnabled = item != .lock || (selectedTextEntry != nil && !storage.isTransferring)
         return BarMenuAction(id: "overflow-\(item.rawValue)", title: title, detail: detail, isEnabled: isEnabled) {
             switch item {
@@ -3850,6 +4018,8 @@ extension ContentView {
                 NSApplication.shared.windows.first?.toggleFullScreen(nil)
             case .settings:
                 SettingsWindow.toggle(openSettings)
+            case .fontSize:
+                cycleFontSize()
             default:
                 if let command { handle(command) }
             }

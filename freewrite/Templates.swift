@@ -14,11 +14,41 @@ struct WritingTemplate: Codable, Equatable, Identifiable, Sendable {
     var name: String
     /// Inserted as is, after `TemplateExpander` fills in `{{date}}`, `{{time}}` and `{{cursor}}`.
     var body: String
+    /// Font and size the page switches to when the template is inserted; nil = keep the page's.
+    var font: String?
+    var size: Double?
 
-    init(id: String = UUID().uuidString, name: String, body: String) {
+    init(id: String = UUID().uuidString, name: String, body: String, font: String? = nil, size: Double? = nil) {
         self.id = id
         self.name = name
         self.body = body
+        self.font = font
+        self.size = size
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, body, font, size
+    }
+
+    /// Templates saved before font/size existed decode as "keep the page's"; a malformed
+    /// font/size is dropped rather than losing every template to the defaults.
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        body = try container.decode(String.self, forKey: .body)
+        let writing = WritingSettings(
+            font: (try? container.decodeIfPresent(String.self, forKey: .font)) ?? nil,
+            size: (try? container.decodeIfPresent(Double.self, forKey: .size)) ?? nil
+        )
+        font = writing.font
+        size = writing.size
+    }
+
+    /// What inserting the template does to the page's look; nil when it keeps it.
+    var writing: WritingSettings? {
+        let writing = WritingSettings(font: font, size: size)
+        return writing.isEmpty ? nil : writing
     }
 
     /// The name shown in lists and the slash menu.

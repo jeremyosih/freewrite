@@ -171,7 +171,7 @@ struct TemplatesSettingsView: View {
     private func duplicateSelected() {
         guard let template = selectedTemplate else { return }
         var list = templates
-        let copy = WritingTemplate(name: "\(template.displayName) copy", body: template.body)
+        let copy = WritingTemplate(name: "\(template.displayName) copy", body: template.body, font: template.font, size: template.size)
         let index = (list.firstIndex(where: { $0.id == template.id }) ?? list.count - 1) + 1
         list.insert(copy, at: index)
         templatesJSON = TemplateStore.encode(list)
@@ -209,9 +209,11 @@ struct TemplatesSettingsView: View {
 
 // MARK: - Template editor
 
-/// The right column: one template's name and text, saved as you type.
+/// The right column: one template's name, font, size and text, saved as you type.
 private struct TemplateEditor: View {
     @Binding var template: WritingTemplate
+
+    private static let families = NSFontManager.shared.availableFontFamilies.sorted()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -222,6 +224,42 @@ private struct TemplateEditor: View {
                         .multilineTextAlignment(.trailing)
                         .frame(maxWidth: 200)
                         .accessibilityIdentifier("templateName")
+                }
+                SettingsCardRow("Font", subtitle: "The page switches to it when inserted") {
+                    Picker("Font", selection: $template.font) {
+                        Text("Keep page font").tag(String?.none)
+                        Divider()
+                        ForEach(WritingFont.presets, id: \.name) { preset in
+                            Text(preset.label).tag(Optional(preset.name))
+                        }
+                        Divider()
+                        ForEach(Self.families, id: \.self) { family in
+                            Text(family).tag(Optional(family))
+                        }
+                        // Keep a font that's no longer installed selectable.
+                        if let font = template.font, !Self.families.contains(font),
+                           !WritingFont.presets.contains(where: { $0.name == font }) {
+                            Text(font).tag(Optional(font))
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 200)
+                    .accessibilityIdentifier("templateFont")
+                }
+                SettingsCardRow("Size") {
+                    Picker("Size", selection: $template.size) {
+                        Text("Keep page size").tag(Double?.none)
+                        Divider()
+                        ForEach(WritingFont.sizes, id: \.self) { size in
+                            Text("\(Int(size)) px").tag(Optional(size))
+                        }
+                        if let size = template.size, !WritingFont.sizes.contains(size) {
+                            Text("\(size.formatted()) px").tag(Optional(size))
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 200)
+                    .accessibilityIdentifier("templateSize")
                 }
             }
 

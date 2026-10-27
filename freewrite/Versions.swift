@@ -7,7 +7,7 @@
 //  `Entries/[UUID]-[date]/`, created the first time an entry needs it:
 //
 //      Entries/[UUID]-[date]/
-//        entry.json              {"current":"v2","versions":[{"id":"v1",…},{"id":"v2",…}]}
+//        entry.json              {"current":"v2","versions":[{"id":"v1",…},{"id":"v2",…}],"writing":{…}}
 //        versions/v1.md          sealed, read-only snapshots
 //        audio/v1.m4a            voice note recorded for v1
 //        audio/v1.transcript.md  raw transcript of that voice note
@@ -53,6 +53,8 @@ struct EntryManifest: Codable, Equatable, Sendable {
     /// Id of the version held by the top-level file.
     var current: String
     var versions: [EntryVersion]
+    /// The page's own font and size (all versions); nil = the defaults from Settings › General.
+    var writing: WritingSettings? = nil
 
     /// What an entry without an `Entries/` folder implicitly has: one typed version.
     static func single(createdAt: Date) -> EntryManifest {
@@ -68,6 +70,22 @@ struct EntryManifest: Codable, Equatable, Sendable {
 
     /// Shown once there is something to switch between or play back.
     var isInteresting: Bool { versions.count > 1 || hasVoiceNote }
+}
+
+extension EntryManifest {
+    private enum CodingKeys: String, CodingKey {
+        case current, versions, writing
+    }
+
+    /// `writing` is optional and tolerant: a missing or malformed value never makes the
+    /// manifest (and so the versions) unreadable.
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        current = try container.decode(String.self, forKey: .current)
+        versions = try container.decode([EntryVersion].self, forKey: .versions)
+        let writing = (try? container.decodeIfPresent(WritingSettings.self, forKey: .writing)) ?? nil
+        self.writing = writing?.isEmpty == true ? nil : writing
+    }
 }
 
 /// Where a voice note ended up after `attachVoiceNote`.
@@ -222,6 +240,37 @@ struct EntryVersionStore: Sendable {
         let url = manifestURL(for: entryFilename)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Self.encoder.encode(manifest).write(to: url, options: .atomic)
+    }
+
+    /// The page's own font and size, or nil (the defaults) when it has none or its manifest
+    /// can't be read.
+    func writingSettings(for entryFilename: String) -> WritingSettings? {
+        (try? savedManifest(for: entryFilename))??.writing
+    }
+
+    /// Stores (or with nil / an empty value, clears) the page's font and size in its manifest.
+    /// An entry without a manifest gets one holding just v1 (what it implicitly had), so its
+    /// versions don't change; clearing never creates one. A corrupt manifest or a missing entry
+    /// file throws rather than anything being written. Returns the manifest as saved (nil when
+    /// there is none).
+    @discardableResult
+    func setWritingSettings(_ settings: WritingSettings?, for entryFilename: String) throws -> EntryManifest? {
+        let settings = settings?.isEmpty == true ? nil : settings
+        // Never recreate `Entries/<base>/` for an entry that is gone.
+        guard fileExists(entryFileURL(for: entryFilename), entryFilename: entryFilename) else {
+            throw Failure.missingEntry(entryFilename)
+        }
+        guard var manifest = try savedManifest(for: entryFilename) else {
+            guard let settings else { return nil }
+            var manifest = EntryManifest.single(createdAt: createdAt(ofEntry: entryFilename))
+            manifest.writing = settings
+            try saveManifest(manifest, for: entryFilename)
+            return manifest
+        }
+        guard manifest.writing != settings else { return manifest }
+        manifest.writing = settings
+        try saveManifest(manifest, for: entryFilename)
+        return manifest
     }
 
     /// Seals the current version and starts the next one from an empty page:
