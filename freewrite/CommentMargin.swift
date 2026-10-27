@@ -333,10 +333,14 @@ struct CommentCardView: View {
 // MARK: - Connectors
 
 /// The lines from cards to their passages, drawn over the whole window and never hit-tested.
-/// Only passages and cards that are both on screen get a line.
+/// Only passages and cards that are both on screen get a line, and only cards level with their
+/// passage (or the hovered/active one).
 struct CommentConnectorLayer: View {
     let model: CommentMarginModel
     let cards: [CommentCardItem]
+
+    /// How far (pt) a card may sit from its passage and still show its line without being hovered.
+    static let restingLineReach: CGFloat = 28
 
     var body: some View {
         // Read here (not in the Canvas closure) so SwiftUI redraws when any of it changes.
@@ -358,6 +362,9 @@ struct CommentConnectorLayer: View {
                     guard cardY > area.minY, cardY < area.maxY,
                           highlight.midY > editor.minY, highlight.midY < editor.maxY else { continue }
                     let isEmphasized = emphasized == card.id
+                    // Like Docs: a card pushed away from its passage only gets its line while it's
+                    // hovered or active; drawing all of them turns the gutter into a tangle.
+                    guard isEmphasized || abs(cardY - highlight.midY) <= Self.restingLineReach else { continue }
                     let points = CommentConnector.points(
                         cardRightX: area.maxX - CommentMarginModel.cardInset,
                         cardY: cardY,
