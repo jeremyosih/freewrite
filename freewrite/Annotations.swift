@@ -59,7 +59,22 @@ struct AnnotationStore: Sendable {
     static let fileName = "annotations.json"
     static let reviewsDirectoryName = "reviews"
 
+    enum Failure: LocalizedError, Equatable {
+        /// The entry's file is gone (deleted, or moved to another folder).
+        case entryMissing
+
+        var errorDescription: String? { "This entry no longer exists in the entries folder." }
+    }
+
     let versionStore: EntryVersionStore
+
+    /// Writes never recreate the folder of an entry whose `.md` file is gone (a late write
+    /// from a review of a deleted or moved entry).
+    private func requireEntry(_ entryFilename: String) throws {
+        guard FileManager.default.fileExists(atPath: versionStore.entryFileURL(for: entryFilename).path) else {
+            throw Failure.entryMissing
+        }
+    }
 
     func fileURL(for entryFilename: String) -> URL {
         versionStore.entryDirectory(for: entryFilename).appendingPathComponent(Self.fileName)
@@ -81,6 +96,7 @@ struct AnnotationStore: Sendable {
             }
             return
         }
+        try requireEntry(entryFilename)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Self.encoder.encode(annotations).write(to: url, options: .atomic)
     }
@@ -100,6 +116,7 @@ struct AnnotationStore: Sendable {
     /// Writes a reviewer's closing summary to `reviews/<timestamp>-<reviewer>.md`.
     @discardableResult
     func saveSummary(_ summary: String, reviewerName: String, versionId: String, entryFilename: String, now: Date = Date()) throws -> URL {
+        try requireEntry(entryFilename)
         let directory = versionStore.entryDirectory(for: entryFilename)
             .appendingPathComponent(Self.reviewsDirectoryName, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

@@ -99,10 +99,14 @@ struct AnnotationAnchoringTests {
 struct AnnotationStoreTests {
     private let entry = "[6910BBDE-75FC-415C-ABB9-C76644B037B2]-[2026-02-20-08-01-04].md"
 
-    private func makeStore() throws -> AnnotationStore {
+    private func makeStore(withEntry: Bool = true) throws -> AnnotationStore {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("freewrite-annotations-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        return AnnotationStore(versionStore: EntryVersionStore(root: root))
+        let versions = EntryVersionStore(root: root)
+        if withEntry {
+            try "Text.".write(to: versions.entryFileURL(for: entry), atomically: true, encoding: .utf8)
+        }
+        return AnnotationStore(versionStore: versions)
     }
 
     @Test func jsonRoundTripAndShape() throws {
@@ -147,6 +151,19 @@ struct AnnotationStoreTests {
                               now: Date(timeIntervalSince1970: 200))
         #expect(store.latestSummary(versionId: "v1", entryFilename: entry) == "Second look.")
         #expect(store.latestSummary(versionId: "v2", entryFilename: entry) == nil)
+    }
+
+    @Test func writesForAMissingEntryDontRecreateItsFolder() throws {
+        let store = try makeStore(withEntry: false)
+        let note = Annotation(
+            id: "A1", entryId: "6910BBDE-75FC-415C-ABB9-C76644B037B2", versionId: "v1", reviewerId: "coach", runId: "r",
+            anchor: AnnotationAnchor(quote: "Text", prefix: "", suffix: ".", start: 0, end: 4),
+            comment: "Hi.", kind: "observation", status: .active, createdAt: Date())
+        #expect(throws: AnnotationStore.Failure.entryMissing) { try store.save([note], for: entry) }
+        #expect(throws: AnnotationStore.Failure.entryMissing) {
+            try store.saveSummary("Late.", reviewerName: "Coach", versionId: "v1", entryFilename: entry)
+        }
+        #expect(!FileManager.default.fileExists(atPath: store.versionStore.entryDirectory(for: entry).path))
     }
 }
 

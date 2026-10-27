@@ -170,6 +170,8 @@ struct ContentView: View {
     @State private var annotationsEntryId: UUID? = nil
     @State private var annotationsBaseText = ""
     @State private var annotationSaveTask: Task<Void, Never>? = nil
+    /// Anchors moved by typing, not written yet (saved after a 1 s pause or by `flushAnnotationAnchors`).
+    @State private var pendingAnchors: PendingAnchors? = nil
     @State private var showingReviewMenu = false
     @State private var isHoveringReview = false
     let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -1254,6 +1256,8 @@ struct ContentView: View {
             showStatus("Couldn't save this entry, so no new version was started.")
             return
         }
+        // Same for the notes on it: their positions must match the text being sealed.
+        flushAnnotationAnchors()
         do {
             let sealedId = entryManifest?.current ?? versionStore.manifest(for: entry.filename).current
             let manifest = try versionStore.sealCurrent(entryFilename: entry.filename)
@@ -1904,9 +1908,16 @@ struct ContentView: View {
         }
         .onDisappear {
             WritingWindow.openCount -= 1
+            flushAnnotationAnchors()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            flushAnnotationAnchors()
         }
         .onChange(of: storage.rootURL) {
             // The entries folder changed in Settings; show what's in the new one.
+            // Reviews stay tied to the folder they started in, so they stop here.
+            reviews.stopReviews(outside: storage.rootURL)
+            flushAnnotationAnchors()
             currentVideoURL = nil
             resetVersionState(for: nil)
             loadExistingEntries()
@@ -2637,6 +2648,8 @@ struct ContentView: View {
         // Delete the file from the filesystem
         let documentsDirectory = getDocumentsDirectory()
         let fileURL = documentsDirectory.appendingPathComponent(entry.filename)
+        // A review still running would write notes and a summary for an entry that's gone.
+        reviews.stopReviews(of: entry.filename, in: documentsDirectory)
 
         do {
             try fileManager.removeItem(at: fileURL)
@@ -2936,7 +2949,8 @@ extension ContentView {
     /// Reads `annotations.json` for the selected entry and re-anchors the current version's notes
     /// to the text in the editor (saving any offsets or statuses that changed).
     private func reloadAnnotations() {
-        annotationSaveTask?.cancel()
+        // Anchors moved by the last edits belong to the text they were typed in; save them first.
+        flushAnnotationAnchors()
         guard let entry = selectedTextEntry else {
             annotations = []
             annotationsEntryId = nil
@@ -2971,20 +2985,31 @@ extension ContentView {
         let moved = AnnotationAnchoring.followEdit(annotations, versionId: current, from: old, to: text)
         guard moved != annotations else { return }
         annotations = moved
-        let filename = entry.filename
+        pendingAnchors = PendingAnchors(annotations: moved, entryFilename: entry.filename, store: annotationStore)
         annotationSaveTask?.cancel()
         annotationSaveTask = Task {
             try? await Task.sleep(for: .seconds(1))
             guard !Task.isCancelled else { return }
-            persistAnchors(moved, entryFilename: filename)
+            flushAnnotationAnchors()
         }
     }
 
+    /// Writes the anchors typing moved, now, into the folder and entry they were typed in.
+    /// Runs before anything that reloads the notes or seals the text (switching entry, version
+    /// or folder, New Version, closing the window, quitting).
+    private func flushAnnotationAnchors() {
+        annotationSaveTask?.cancel()
+        annotationSaveTask = nil
+        guard let pending = pendingAnchors else { return }
+        pendingAnchors = nil
+        persistAnchors(pending.annotations, entryFilename: pending.entryFilename, in: pending.store)
+    }
+
     /// Writes anchors/statuses into the file, merging by id so notes a running review added meanwhile stay.
-    private func persistAnchors(_ updated: [Annotation], entryFilename: String) {
+    private func persistAnchors(_ updated: [Annotation], entryFilename: String, in store: AnnotationStore? = nil) {
         let byId = Dictionary(updated.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         do {
-            try annotationStore.update(for: entryFilename) { stored in
+            try (store ?? annotationStore).update(for: entryFilename) { stored in
                 for index in stored.indices {
                     guard stored[index].status != .dismissed, let mine = byId[stored[index].id] else { continue }
                     stored[index].anchor = mine.anchor
@@ -3076,6 +3101,12 @@ extension ContentView {
                     let outcome = try await reviews.review(entryFilename: entry.filename, entryId: entry.id, versionId: versionId, profile: profile)
                     let notes = outcome.added == 1 ? "1 note" : "\(outcome.added) notes"
                     showStatus(outcome.added == 0 ? "\(profile.name) had nothing to add." : "\(profile.name) left \(notes) on \(versionId).", for: entry.id)
+                } catch ReviewError.stopped(let reason) {
+                    // The rest of the queue would run on an entry that's gone or in another folder.
+                    if reason == .folderChanged {
+                        showStatus("\(profile.name): \(ReviewError.stopped(reason).localizedDescription)")
+                    }
+                    return
                 } catch {
                     showStatus("\(profile.name): \(error.localizedDescription)", for: entry.id)
                 }
@@ -3213,4 +3244,11 @@ extension ContentView {
             }
         }
     }
+}
+
+/// Annotation anchors moved by typing and not saved yet, with the folder and entry they belong to.
+struct PendingAnchors {
+    let annotations: [Annotation]
+    let entryFilename: String
+    let store: AnnotationStore
 }

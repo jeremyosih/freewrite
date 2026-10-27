@@ -185,10 +185,18 @@ struct ReviewOutcome: Equatable, Sendable {
     let summary: String?
 }
 
+/// Why a running review was stopped before it finished.
+enum ReviewStopReason: Equatable, Sendable {
+    /// The entries folder changed (Move, Copy or Just Switch): the run stays tied to the folder it started in.
+    case folderChanged
+    case entryDeleted
+}
+
 enum ReviewError: LocalizedError, Equatable {
     case notConfigured
     case providerNotConfigured(String)
     case busy
+    case stopped(ReviewStopReason)
     case failed(String)
 
     var errorDescription: String? {
@@ -199,6 +207,10 @@ enum ReviewError: LocalizedError, Equatable {
             return "\(provider) isn't set up. Add it in Settings › Agents."
         case .busy:
             return "A review of this entry is already running."
+        case .stopped(.folderChanged):
+            return "The review stopped because the entries folder changed."
+        case .stopped(.entryDeleted):
+            return "The review stopped because the entry was deleted."
         case .failed(let message):
             return message
         }
@@ -473,6 +485,9 @@ final class ReviewService: ObservableObject {
     let credentials: any CredentialStore
     private let databaseURL: URL?
     private let root: @MainActor () -> URL
+    /// Reviews this process started and hasn't finished. Tools only serve the runs listed here,
+    /// always in the folder the run started in.
+    private var bindings: [RunBinding] = []
     private let makeModels: @MainActor (any CredentialStore) async throws -> Models
     private var cachedModels: Models?
     private var harness: Harness?
@@ -480,7 +495,8 @@ final class ReviewService: ObservableObject {
 
     /// - Parameters:
     ///   - directory: Holds `reviews.sqlite`; nil keeps conversations in memory (tests).
-    ///   - root: The entries folder, read at every tool call (the user can switch folders).
+    ///   - root: The entries folder. A run keeps the folder it started in; tool calls after the
+    ///     folder changed stop the run.
     ///   - makeModels: Builds the model collection on first use (it starts the JavaScript runtime).
     init(
         directory: URL? = ReviewService.defaultDirectory,
@@ -592,6 +608,11 @@ final class ReviewService: ObservableObject {
     private struct RunCount: Codable, Sendable { var count = 0 }
     private static let runCounter = Document("freewrite.reviewRuns", scope: .session, keyed: true, initial: RunCount())
 
+    /// Review conversations that may still have work: added when one is created, removed when
+    /// its `review` call returns. Whatever is left when the harness opens was cut short by a crash or quit.
+    struct OpenReviews: Codable, Sendable { var conversations: [ConversationID] = [] }
+    static let openReviews = Document("freewrite.openReviews", scope: .session, initial: OpenReviews())
+
     private func openHarness() async throws -> Harness {
         if let harness { return harness }
         if let opening { return try await opening.value }
@@ -604,7 +625,18 @@ final class ReviewService: ObservableObject {
             } else {
                 storage = .memory
             }
-            return try await Harness.open(storage, models: models, extensions: [reviewerExtension()])
+            // Don't let the scheduler continue interrupted reviews: nobody waits for them any more
+            // (no spinner, no result) and a new review of the same entry would run next to them.
+            // They're aborted first, then the scheduler starts for new work.
+            let harness = try await Harness.open(storage, models: models, extensions: [reviewerExtension()], resume: false)
+            do {
+                try await Self.abortInterruptedReviews(in: harness)
+                try await harness.resume()
+            } catch {
+                try? await harness.close()
+                throw error
+            }
+            return harness
         }
         opening = task
         defer { opening = nil }
@@ -616,6 +648,64 @@ final class ReviewService: ObservableObject {
     func close() async {
         try? await harness?.close()
         harness = nil
+    }
+
+    /// Aborts the review conversations a previous process left unfinished and forgets them.
+    static func abortInterruptedReviews(in harness: Harness) async throws {
+        let open = try await harness.document(openReviews).conversations
+        guard !open.isEmpty else { return }
+        for id in open {
+            guard let conversation = try await harness.conversation(id) else { continue }
+            try await conversation.abort()
+        }
+        try await harness.update(openReviews) { $0.conversations.removeAll { open.contains($0) } }
+    }
+
+    private func forgetOpenReview(_ id: ConversationID, in harness: Harness) async {
+        _ = try? await harness.update(Self.openReviews) { $0.conversations.removeAll { $0 == id } }
+    }
+
+    // MARK: Stopping
+
+    /// A review started by this process: the folder and entry it works on, and whether it was stopped.
+    private final class RunBinding {
+        let entryFilename: String
+        let root: URL
+        var runId: String?
+        var conversation: Conversation?
+        var stopReason: ReviewStopReason?
+
+        init(entryFilename: String, root: URL) {
+            self.entryFilename = entryFilename
+            self.root = root
+        }
+    }
+
+    private static func isSameFolder(_ lhs: URL, _ rhs: URL) -> Bool {
+        lhs.standardizedFileURL.resolvingSymlinksInPath().path == rhs.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    private func stop(_ binding: RunBinding, reason: ReviewStopReason) {
+        guard binding.stopReason == nil else { return }
+        binding.stopReason = reason
+        if let conversation = binding.conversation {
+            Task { try? await conversation.abort() }
+        }
+    }
+
+    /// Stops the reviews of `entryFilename` in `root`, e.g. before the entry is deleted. Their
+    /// tools refuse to run from now on, so nothing more is written for it.
+    func stopReviews(of entryFilename: String, in root: URL, reason: ReviewStopReason = .entryDeleted) {
+        for binding in bindings where binding.entryFilename == entryFilename && Self.isSameFolder(binding.root, root) {
+            stop(binding, reason: reason)
+        }
+    }
+
+    /// Stops every review that runs in another folder than `root` (the entries folder changed).
+    func stopReviews(outside root: URL) {
+        for binding in bindings where !Self.isSameFolder(binding.root, root) {
+            stop(binding, reason: .folderChanged)
+        }
     }
 
     private func reviewerExtension() -> Extension {
@@ -638,18 +728,33 @@ final class ReviewService: ObservableObject {
         activeRuns[entryFilename] = ReviewActivity(reviewerName: profile.name, versionId: versionId)
         defer { activeRuns[entryFilename] = nil }
 
+        // The run belongs to the entry in the folder it starts in, whatever the user does meanwhile.
+        let binding = RunBinding(entryFilename: entryFilename, root: root())
+        bindings.append(binding)
+        defer { bindings.removeAll { $0 === binding } }
+        let versionStore = EntryVersionStore(root: binding.root)
+        guard FileManager.default.fileExists(atPath: versionStore.entryFileURL(for: entryFilename).path) else {
+            throw ReviewError.failed(AnnotationStore.Failure.entryMissing.localizedDescription)
+        }
+        func checkStopped() throws {
+            if let reason = binding.stopReason { throw ReviewError.stopped(reason) }
+        }
+
         let model = try await resolveModel(for: profile)
+        try checkStopped()
         let harness: Harness
         do {
             harness = try await openHarness()
         } catch {
             throw ReviewError.failed("Couldn't start the reviewer: \(error.localizedDescription)")
         }
+        try checkStopped()
         let key = "\(entryId.uuidString):\(versionId):\(profile.id)"
         let count = try await harness.update(Self.runCounter, key: key) { $0.count += 1 }.count
         let run = ReviewRunContext(
             entryFilename: entryFilename, entryId: entryId.uuidString, versionId: versionId,
             reviewerId: profile.id, reviewerName: profile.name, runId: "review:\(key):\(count)", scope: profile.scope)
+        binding.runId = run.runId
 
         let agent = AgentChange(
             model: model,
@@ -657,11 +762,17 @@ final class ReviewService: ObservableObject {
             instructions: profile.instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : profile.instructions
         )
         let runDocument = Self.runDocument
+        let openReviews = Self.openReviews
         let conversation = try await harness.createConversation(agent: agent) { tx, id in
             try await tx.setDocument(runDocument, run, of: .conversation(id))
+            try await tx.updateDocument(openReviews, of: .session) { $0.conversations.append(id) }
         }
-        let toolbox = ReviewToolbox(versionStore: EntryVersionStore(root: root()), run: run)
+        defer { Task { await forgetOpenReview(conversation.id, in: harness) } }
+        binding.conversation = conversation
+        try checkStopped()
+        let toolbox = ReviewToolbox(versionStore: versionStore, run: run)
         let record = try await conversation.submit(toolbox.brief(), requestId: run.runId).wait()
+        try checkStopped()
         try await checkOutcome(record, in: conversation)
 
         let saved = (try? toolbox.annotations.load(for: entryFilename)) ?? []
@@ -713,7 +824,9 @@ final class ReviewService: ObservableObject {
     private struct RemoveArguments: Decodable, Sendable { var id: String }
     private struct FinishArguments: Decodable, Sendable { var summary: String }
 
-    /// Runs a toolbox function for the calling conversation's review, on the main actor.
+    /// Runs a toolbox function for the calling conversation's review, on the main actor, in the
+    /// folder the review started in. Runs that were stopped, or that this process didn't start
+    /// (left over from a crash), get a terminating error and touch nothing.
     /// Tools that change annotations (`mutates`) tell the open window to reload them.
     private func withToolbox(
         _ context: ToolCallContext, mutates: Bool = false, _ body: @MainActor (ReviewToolbox) throws -> String
@@ -721,7 +834,14 @@ final class ReviewService: ObservableObject {
         do {
             let run = try await context.document(Self.runDocument)
             guard !run.entryFilename.isEmpty else { return .error("This conversation isn't a Freewrite review.") }
-            let toolbox = ReviewToolbox(versionStore: EntryVersionStore(root: root()), run: run)
+            guard let binding = bindings.first(where: { $0.runId == run.runId }), binding.stopReason == nil else {
+                return ToolResult.error("This review was stopped. Don't call any more tools.").terminating()
+            }
+            guard Self.isSameFolder(binding.root, root()) else {
+                stop(binding, reason: .folderChanged)
+                return ToolResult.error("This review was stopped. Don't call any more tools.").terminating()
+            }
+            let toolbox = ReviewToolbox(versionStore: EntryVersionStore(root: binding.root), run: run)
             let output = try body(toolbox)
             if mutates { annotationsChanged.send(run.entryFilename) }
             return .text(output)
