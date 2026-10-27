@@ -8,6 +8,7 @@
 
 import SwiftUI
 import AppKit
+import Combine
 import UniformTypeIdentifiers
 import PDFKit
 
@@ -865,7 +866,6 @@ struct ContentView: View {
 
     
     var body: some View {
-        let buttonBackground = colorScheme == .light ? Color.white : Color.black
         let navHeight: CGFloat = 68
         let textColor = colorScheme == .light ? Color.gray : Color.gray.opacity(0.8)
         let textHoverColor = colorScheme == .light ? Color.black : Color.white
@@ -1376,7 +1376,7 @@ struct ContentView: View {
                                 .cornerRadius(8)
                                 .shadow(color: Color.black.opacity(0.1), radius: 4, y: 2)
                                 // Reset copied state when popover dismisses
-                                .onChange(of: showingChatMenu) { newValue in
+                                .onChange(of: showingChatMenu) { _, newValue in
                                     if !newValue {
                                         didCopyPrompt = false
                                     }
@@ -1729,7 +1729,7 @@ struct ContentView: View {
                 clearVideoRecordingPreparationState()
             }
         }
-        .onChange(of: text) { _ in
+        .onChange(of: text) {
             // Save current entry when text changes
             if let currentId = selectedEntryId,
                let currentEntry = entries.first(where: { $0.id == currentId }),
