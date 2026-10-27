@@ -45,6 +45,8 @@ struct WritingEditor: NSViewRepresentable {
         textView.isEditable = isEditable
         textView.importsGraphics = false
         textView.allowsUndo = true
+        // No Apple Intelligence Writing Tools (the button on a selection and the context-menu item).
+        textView.writingToolsBehavior = .none
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 0, height: verticalInset)
         textView.isVerticallyResizable = true
