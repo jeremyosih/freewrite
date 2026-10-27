@@ -31,6 +31,9 @@ struct CommandPaletteView: View {
     /// once the pointer leaves it, so rows scrolling under a resting pointer can't steal it.
     @State private var pinnedPointer: CGPoint?
     @State private var listHeight: CGFloat = 0
+    /// ↩ pressed before the current query's search finished (the value is "alternate");
+    /// performed as soon as its results arrive, so Return never opens a stale result.
+    @State private var pendingSubmit: Bool?
 
     private var searchKey: SearchKey { SearchKey(query: query, indexID: index?.id) }
 
@@ -102,6 +105,10 @@ struct CommandPaletteView: View {
             results = found
             resultsKey = key
             pinPointer()
+            if let alternate = pendingSubmit {
+                pendingSubmit = nil
+                submit(alternate: alternate)
+            }
         }
     }
 
@@ -211,6 +218,10 @@ struct CommandPaletteView: View {
 
     /// ↩ opens the highlighted row. ⌘↩ on a sealed version opens the entry's current version instead.
     private func submit(alternate: Bool) {
+        guard resultsKey == searchKey else {
+            pendingSubmit = alternate
+            return
+        }
         guard let item = highlightedItem else { return }
         if alternate, case .entry(var document, _) = item, document.version != nil {
             document.version = nil
