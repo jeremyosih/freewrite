@@ -1146,6 +1146,10 @@ struct ContentView: View {
             toggleFocusMode()
         case .insertTemplate:
             insertTemplate()
+        case .newReviewerByChat:
+            // The chat opens as a sheet on Settings › Agents, where its reviewer gets selected on Save.
+            ReviewerChatLauncher.shared.open()
+            openReviewerSettings()
         }
     }
 
@@ -1990,8 +1994,10 @@ struct ContentView: View {
                         guard keyDownMonitor == nil else { return }
                         keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                             // Check if backspace is disabled and the key is delete/backspace
-                            // Only the writing editor: leave the palette search and the Settings window alone.
-                            let isSettingsWindow = event.window?.identifier?.rawValue.contains("Settings") == true
+                            // Only the writing editor: leave the palette search and the Settings window (and its sheets) alone.
+                            let isSettingsWindow = [event.window, event.window?.sheetParent].contains {
+                                $0?.identifier?.rawValue.contains("Settings") == true
+                            }
                             // Plain Backspace may still edit a "/" template query (never the "/" or the text before it);
                             // ⌘/⌥/⌃ deletions reach past the query, so they stay blocked.
                             let plainBackspace = event.keyCode == 51

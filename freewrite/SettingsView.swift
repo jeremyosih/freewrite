@@ -41,6 +41,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
     case useDefaultFont
     case showWelcomeEntry
     case insertTemplate
+    case newReviewerByChat
     case toggleFocusMode
 
     var id: String { rawValue }
@@ -65,6 +66,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .useDefaultFont: return "Use Default Font & Size"
         case .showWelcomeEntry: return "Show Welcome Entry"
         case .insertTemplate: return "Insert Template…"
+        case .newReviewerByChat: return "New Reviewer by Chat…"
         case .toggleFocusMode: return "Focus Mode"
         }
     }
@@ -84,7 +86,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .toggleTheme: return KeyShortcut(key: "l", modifiers: [.command, .shift])
         case .increaseFontSize: return KeyShortcut(key: "=", modifiers: [.command])
         case .decreaseFontSize: return KeyShortcut(key: "-", modifiers: [.command])
-        case .showWelcomeEntry, .insertTemplate, .chooseFont, .randomFont, .useDefaultFont: return nil
+        case .showWelcomeEntry, .insertTemplate, .chooseFont, .randomFont, .useDefaultFont, .newReviewerByChat: return nil
         case .toggleFocusMode: return KeyShortcut(key: "f", modifiers: [.command, .shift])
         }
     }
@@ -271,6 +273,7 @@ struct FreewriteCommands: Commands {
             button(for: .recordVoiceNote)
             Divider()
             button(for: .reviewEntry)
+            button(for: .newReviewerByChat)
             button(for: .toggleNoteLock)
         }
         CommandGroup(after: .sidebar) {
