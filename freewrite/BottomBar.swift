@@ -9,6 +9,7 @@ import SwiftUI
 
 enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
     case versions
+    case wordCount
     case timer
     case recordVideo
     case recordVoiceNote
@@ -25,6 +26,7 @@ enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
     var title: String {
         switch self {
         case .versions: return "Versions"
+        case .wordCount: return "Word Count"
         case .timer: return "Timer"
         case .recordVideo: return "Record Video"
         case .recordVoiceNote: return "Record Voice Note"
@@ -41,6 +43,7 @@ enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
     var systemImage: String {
         switch self {
         case .versions: return "square.stack"
+        case .wordCount: return "text.word.spacing"
         case .timer: return "timer"
         case .recordVideo: return "video.fill"
         case .recordVoiceNote: return "mic.fill"
@@ -58,6 +61,7 @@ enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
     var previewLabel: String? {
         switch self {
         case .versions: return "v1"
+        case .wordCount: return "142 words"
         case .timer: return "15:00"
         case .backspace: return "Backspace is On"
         case .fullscreen: return "Fullscreen"
@@ -92,7 +96,7 @@ struct BottomBarLayout: Codable, Equatable {
     var slots: [Slot]
 
     static let `default` = BottomBarLayout(slots: BottomBarItem.allCases.map {
-        Slot(item: $0, placement: $0 == .versions ? .left : .right)
+        Slot(item: $0, placement: $0 == .versions || $0 == .wordCount ? .left : .right)
     })
 
     var left: [BottomBarItem] { slots.filter { $0.placement == .left }.map(\.item) }
@@ -100,8 +104,8 @@ struct BottomBarLayout: Codable, Equatable {
 
     /// Decodes a stored layout; unknown or duplicate items are dropped. Items added in later
     /// versions get their default side and are inserted before the stored item that follows them
-    /// by default (Review lands before Backspace, History and Settings and Lock before Settings, never after
-    /// the gear).
+    /// by default (Word Count lands on the left after Versions, Review before Backspace, History and
+    /// Settings and Lock before Settings, never after the gear).
     static func decode(_ json: String) -> BottomBarLayout {
         guard let data = json.data(using: .utf8),
               let stored = try? JSONDecoder().decode(StoredLayout.self, from: data) else {
@@ -142,6 +146,85 @@ struct BottomBarLayout: Codable, Equatable {
 
 extension SettingsKey {
     static let bottomBarLayout = "bottomBarLayout"
+    /// "words" or "characters": what the Word Count item shows.
+    static let wordCountUnit = "wordCountUnit"
+}
+
+// MARK: - What the bar shows right now
+
+/// The state that decides whether a placed item shows in the bar right now.
+struct BottomBarContext: Equatable {
+    /// A video entry is on screen.
+    var isVideoEntry = false
+    /// A text entry is selected and its versions are loaded.
+    var hasTextEntry = false
+    /// The selected note is locked and not open: nothing of it is shown.
+    var isNoteClosed = false
+    /// The selected note is locked, open or not.
+    var isNoteLocked = false
+}
+
+extension BottomBarItem {
+    /// Whether the item renders in `context`. An item that's pending (camera preflight, a running
+    /// review, a microphone prompt) still shows: its content changes in place, it never goes away.
+    func isVisible(in context: BottomBarContext) -> Bool {
+        switch self {
+        // Writing-only controls.
+        case .backspace, .lock: return !context.isVideoEntry
+        // Nothing of a locked note is shown until it's opened.
+        case .versions, .wordCount, .recordVoiceNote:
+            return !context.isVideoEntry && context.hasTextEntry && !context.isNoteClosed
+        // Locked notes are never sent to a reviewer, open or not.
+        case .review: return !context.isVideoEntry && !context.isNoteLocked
+        case .timer, .recordVideo, .fullscreen, .newEntry, .history, .settings: return true
+        }
+    }
+}
+
+/// One control in a bar group: an item, or the "…" button holding the items that don't fit.
+enum BottomBarSlot: Hashable {
+    case item(BottomBarItem)
+    case overflow
+}
+
+/// Which slots each side renders. Every slot renders something, so a group only needs a `•`
+/// before each slot after the first (and before the first when the status slot is showing).
+enum BottomBarModel {
+    /// Bar items that move into "…" first when the bar is too narrow. Settings and the version
+    /// menu always stay.
+    static let overflowOrder: [BottomBarItem] = [
+        .fullscreen, .wordCount, .backspace, .newEntry, .timer, .recordVideo, .recordVoiceNote, .review, .lock, .history,
+    ]
+
+    /// Visible items that may move into "…", in the order they do.
+    static func overflowCandidates(layout: BottomBarLayout, context: BottomBarContext) -> [BottomBarItem] {
+        let visible = Set((layout.left + layout.right).filter { $0.isVisible(in: context) })
+        return overflowOrder.filter(visible.contains)
+    }
+
+    /// The left and right slots with `overflow` moved into "…" (placed before the gear so
+    /// Settings stays last on the right; only there when something is in it).
+    static func groups(
+        layout: BottomBarLayout,
+        context: BottomBarContext,
+        overflow: [BottomBarItem] = []
+    ) -> (left: [BottomBarSlot], right: [BottomBarSlot]) {
+        let moved = Set(overflow.filter { $0.isVisible(in: context) })
+        func slots(_ items: [BottomBarItem]) -> [BottomBarSlot] {
+            items.filter { $0.isVisible(in: context) && !moved.contains($0) }.map { .item($0) }
+        }
+        let left = slots(layout.left)
+        var right = slots(layout.right)
+        if !moved.isEmpty {
+            right.insert(.overflow, at: right.firstIndex(of: .item(.settings)) ?? right.endIndex)
+        }
+        return (left, right)
+    }
+
+    /// Whether a `•` goes before the slot at `index`: between slots, and after the status slot.
+    static func separatorBefore(_ index: Int, afterStatus: Bool) -> Bool {
+        index > 0 || afterStatus
+    }
 }
 
 // MARK: - Settings pane
