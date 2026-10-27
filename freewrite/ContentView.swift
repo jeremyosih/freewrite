@@ -1159,6 +1159,8 @@ struct ContentView: View {
             showStatus(viewedVersion != nil ? "Go back to the current version to insert a template." : "Templates go into a text entry.")
             return
         }
+        // An open bar menu's key monitor would take the menu's typing, arrows and Return.
+        closeBarMenu()
         templateMenu.editTemplatesHandler = { openTemplateSettings() }
         // After the palette (if it was open) has given the editor its focus back.
         DispatchQueue.main.async {
