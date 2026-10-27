@@ -4,6 +4,7 @@
 //
 //  Settings › Agents: model providers (Claude API key, ChatGPT sign-in or OpenAI key) on top,
 //  then reviewer profiles in two columns: the list on the left, the selected one's editor on the right.
+//  "New by Chat…" / "Edit with Chat…" open the reviewer chat (ReviewerChatView.swift) as a sheet.
 //
 
 import PiDurableKit
@@ -20,6 +21,7 @@ struct AgentsSettingsView: View {
     @State private var models: [ReviewProvider: [ModelInfo]] = [:]
     @State private var selectedId: String?
     @State private var profilePendingDeletion: ReviewerProfile?
+    private let chatLauncher = ReviewerChatLauncher.shared
 
     private var profiles: [ReviewerProfile] { ReviewerStore.decode(reviewersJSON) }
 
@@ -87,6 +89,12 @@ struct AgentsSettingsView: View {
             }
         } message: {
             Text("Notes it already left stay on your entries.")
+        }
+        .sheet(item: Binding(get: { chatLauncher.chat }, set: { chatLauncher.chat = $0 })) { chat in
+            ReviewerChatSheet(chat: chat, modelName: modelName(id:), onSave: { profile in
+                save(profile)
+                selectedId = profile.id
+            }, onClose: { chatLauncher.chat = nil })
         }
     }
 
@@ -255,8 +263,18 @@ struct AgentsSettingsView: View {
                 .disabled(selectedProfile == nil)
                 .help("Delete the selected reviewer")
                 .accessibilityLabel("Delete Reviewer")
+                Button("New by Chat…") { chatLauncher.open() }
+                    .font(.system(size: 11.5))
+                    .padding(.leading, 4)
+                    .help("Describe a reviewer and let the model set it up")
+                    .accessibilityIdentifier("newReviewerByChatButton")
                 Spacer()
                 Menu {
+                    Button("New Reviewer by Chat…") { chatLauncher.open() }
+                    if let profile = selectedProfile {
+                        Button("Edit “\(profile.name)” with Chat…") { chatLauncher.open(editing: profile) }
+                    }
+                    Divider()
                     Button("Restore Default Reviewers") {
                         reviewersJSON = ""
                         selectedId = nil
@@ -313,16 +331,25 @@ struct AgentsSettingsView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            Button("Edit with Chat…") {
+                selectedId = profile.id
+                chatLauncher.open(editing: profile)
+            }
+        }
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .accessibilityIdentifier("reviewerRow-\(profile.id)")
     }
 
     private func modelName(_ profile: ReviewerProfile) -> String {
-        guard !profile.model.isEmpty else { return "Automatic model" }
+        profile.model.isEmpty ? "Automatic model" : modelName(id: profile.model)
+    }
+
+    private func modelName(id: String) -> String {
         for list in models.values {
-            if let model = list.first(where: { $0.id == profile.model }) { return model.name }
+            if let model = list.first(where: { $0.id == id }) { return model.name }
         }
-        return profile.model
+        return id
     }
 
     // MARK: Editing
