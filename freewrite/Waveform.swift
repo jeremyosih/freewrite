@@ -61,6 +61,7 @@ enum Waveform {
             return accumulator.levels
         }
         while file.framePosition < file.length {
+            try Task.checkCancellation()
             try file.read(into: buffer, frameCount: chunk)
             guard buffer.frameLength > 0, let channel = buffer.floatChannelData?[0] else { break }
             accumulator.add(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
@@ -71,6 +72,9 @@ enum Waveform {
     /// Same as `levels(of:)` for audio that's only in memory (a locked note's decrypted `.m4a`).
     static func levels(of data: Data, count: Int = bucketCount) throws -> [Float] {
         let source = MemoryAudioSource(data: data)
+        // The callbacks get an unretained pointer: keep `source` alive until the file is closed
+        // (declared first, so this runs after the other defers).
+        defer { withExtendedLifetime(source) {} }
         var fileID: AudioFileID?
         var status = AudioFileOpenWithCallbacks(
             Unmanaged.passUnretained(source).toOpaque(),
@@ -119,6 +123,7 @@ enum Waveform {
         let chunk = 32_768
         var samples = [Float](repeating: 0, count: chunk)
         while true {
+            try Task.checkCancellation()
             var frames = UInt32(chunk)
             status = samples.withUnsafeMutableBytes { bytes in
                 var list = AudioBufferList(

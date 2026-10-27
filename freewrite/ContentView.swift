@@ -185,6 +185,10 @@ struct ContentView: View {
     @State private var openBarMenu: BarMenuKind? = nil
     @State private var barMenuHighlight: String? = nil
     @State private var barMenuKeyMonitor: Any?
+    /// The window the open menu belongs to (keys from other windows pass through) and the
+    /// observer that closes the menu when that window stops being key.
+    @State private var barMenuWindow: NSWindow?
+    @State private var barMenuResignObserver: Any?
     @State private var isHoveringOverflow = false
     /// Items in the "…" menu of the bar on screen.
     @State private var barOverflow: [BottomBarItem] = []
@@ -3647,7 +3651,9 @@ extension ContentView {
                 ),
             ])
         case .overflow:
-            let actions = barOverflow.filter(isBottomBarItemAvailable).map(overflowAction(for:))
+            let actions = barOverflow.filter(isBottomBarItemAvailable).flatMap { item in
+                [overflowAction(for: item)] + (item == .timer ? timerOverflowActions : [])
+            }
             return actions.isEmpty ? nil : BarMenuContent(width: 250, sections: [BarMenuSection(id: "items", actions: actions)])
         }
     }
@@ -3692,6 +3698,11 @@ extension ContentView {
             NSEvent.removeMonitor(barMenuKeyMonitor)
             self.barMenuKeyMonitor = nil
         }
+        if let barMenuResignObserver {
+            NotificationCenter.default.removeObserver(barMenuResignObserver)
+            self.barMenuResignObserver = nil
+        }
+        barMenuWindow = nil
     }
 
     private func chooseBarMenuAction(_ action: BarMenuAction) {
@@ -3704,9 +3715,16 @@ extension ContentView {
     /// (except ⌘ shortcuts) are swallowed, like a native menu, so nothing is typed behind it.
     private func installBarMenuKeyMonitor() {
         guard barMenuKeyMonitor == nil else { return }
+        let window = NSApp.keyWindow
+        barMenuWindow = window
+        if let window {
+            barMenuResignObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { _ in
+                MainActor.assumeIsolated { closeBarMenu() }
+            }
+        }
         barMenuKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             guard let kind = openBarMenu,
-                  event.window?.identifier?.rawValue.contains("Settings") != true,
+                  let barMenuWindow, event.window === barMenuWindow,
                   !event.modifierFlags.contains(.command) else { return event }
             guard let content = barMenuContent(kind) else {
                 closeBarMenu()
@@ -3797,6 +3815,24 @@ extension ContentView {
                 if let command { handle(command) }
             }
         }
+    }
+
+    /// What the bar's timer does besides start/pause (double-click resets, scrolling changes the
+    /// length in 5-minute steps up to 45), so it isn't lost when the timer is in "…".
+    private var timerOverflowActions: [BarMenuAction] {
+        let minutes = timeRemaining / 60
+        return [
+            BarMenuAction(id: "overflow-timer-reset", title: "Reset Timer", detail: "\(sessionMinutes):00") {
+                timeRemaining = sessionMinutes * 60
+                timerIsRunning = false
+            },
+            BarMenuAction(id: "overflow-timer-longer", title: "Add 5 Minutes", isEnabled: minutes < 45) {
+                timeRemaining = min((minutes / 5 + 1) * 5, 45) * 60
+            },
+            BarMenuAction(id: "overflow-timer-shorter", title: "Remove 5 Minutes", isEnabled: minutes >= 5) {
+                timeRemaining = max((minutes - 5) / 5 * 5, 0) * 60
+            },
+        ]
     }
 
     private func overflowButton(items: [BottomBarItem], textColor: Color, textHoverColor: Color) -> some View {

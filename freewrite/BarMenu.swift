@@ -105,8 +105,15 @@ struct BarMenuCard: View {
     var body: some View {
         ViewThatFits(in: .vertical) {
             sections
-            ScrollView { sections }
-                .scrollIndicators(.automatic)
+            ScrollViewReader { proxy in
+                ScrollView { sections }
+                    .scrollIndicators(.automatic)
+                    // ↑/↓ in a long list: keep the highlighted row on screen.
+                    .onChange(of: highlighted) { _, id in
+                        guard let id else { return }
+                        proxy.scrollTo(id)
+                    }
+            }
         }
         .frame(width: content.width)
         .background(
@@ -174,6 +181,7 @@ struct BarMenuCard: View {
         }
         ForEach(section.actions) { action in
             row(action)
+                .id(action.id)  // scroll target for the keyboard highlight
         }
         if let footer = section.footer {
             Text(footer)

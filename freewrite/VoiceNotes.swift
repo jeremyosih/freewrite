@@ -208,6 +208,8 @@ final class VoiceNotePlayer: NSObject, AVAudioPlayerDelegate {
 
     @ObservationIgnored private var player: AVAudioPlayer?
     @ObservationIgnored private var tickTimer: Timer?
+    /// Computes `levels` for the loaded note; cancelled when it's stopped or replaced.
+    @ObservationIgnored private var waveformTask: Task<Void, Never>?
 
     /// Plays `url`, or pauses/resumes it when it's the loaded note. `load` supplies the bytes
     /// instead of reading `url` (a locked note's decrypted audio, kept in memory only).
@@ -248,6 +250,8 @@ final class VoiceNotePlayer: NSObject, AVAudioPlayerDelegate {
 
     func stop() {
         stopTicking()
+        waveformTask?.cancel()
+        waveformTask = nil
         player?.stop()
         player = nil
         url = nil
@@ -276,11 +280,13 @@ final class VoiceNotePlayer: NSObject, AVAudioPlayerDelegate {
             print("Voice note: couldn't play \(url.lastPathComponent): \(error)")
             return
         }
-        Task { [weak self] in
-            let levels = await Task.detached(priority: .utility) {
+        waveformTask = Task { [weak self] in
+            let job = Task.detached(priority: .utility) {
                 (try? data.map { try Waveform.levels(of: $0) } ?? Waveform.levels(of: url)) ?? []
-            }.value
-            guard let self, self.url == url else { return }
+            }
+            // A detached task doesn't inherit cancellation: pass it on.
+            let levels = await withTaskCancellationHandler { await job.value } onCancel: { job.cancel() }
+            guard !Task.isCancelled, let self, self.url == url else { return }
             self.levels = levels
         }
     }
