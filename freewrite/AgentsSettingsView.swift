@@ -65,7 +65,9 @@ struct AgentsSettingsView: View {
             await reviews.refreshCredentials()
             await loadModels()
         }
-        .onChange(of: selectedId) { old, _ in
+        // The reviewer on screen, not `selectedId` (nil until a row is clicked, while the first
+        // reviewer is already shown and editable).
+        .onChange(of: selectedProfile?.id) { old, _ in
             if let old { fixUpName(of: old) }
         }
         .onDisappear {
