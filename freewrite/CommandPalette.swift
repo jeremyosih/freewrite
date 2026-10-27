@@ -3,148 +3,70 @@
 //  freewrite
 //
 //  ⌘K palette: search every entry's full text (video transcripts and sealed versions too)
-//  plus app actions.
+//  plus app actions. Matching lives in PaletteSearch.swift.
 //
 
 import SwiftUI
-
-struct PaletteDocument: Identifiable, Equatable, Sendable {
-    /// The entry's id (shared by all of its versions).
-    let id: UUID
-    let date: String
-    let isVideo: Bool
-    let body: String
-    /// A sealed version ("v1"); nil for the entry's current text.
-    var version: String? = nil
-
-    /// First non-empty line, used as the row title.
-    var title: String {
-        let firstLine = body.split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .first(where: { !$0.isEmpty })
-        return firstLine.map { String($0.prefix(80)) } ?? (isVideo ? "Video Entry" : "Empty entry")
-    }
-}
-
-enum PaletteItem: Identifiable {
-    case entry(PaletteDocument, snippet: String?)
-    case command(AppCommand)
-    case settings
-
-    var id: String {
-        switch self {
-        case .entry(let document, _): return "entry-\(document.id.uuidString)-\(document.version ?? "current")"
-        case .command(let command): return "command-\(command.rawValue)"
-        case .settings: return "settings"
-        }
-    }
-}
-
-enum PaletteSearch {
-    /// Every term must appear (case- and diacritic-insensitive). Title hits rank first; ties keep
-    /// the incoming (newest-first) order.
-    static func entries(_ documents: [PaletteDocument], query: String) -> [PaletteItem] {
-        let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
-        guard !terms.isEmpty else {
-            // Sealed versions only show up when searching.
-            return documents.filter { $0.version == nil }.prefix(50).map { .entry($0, snippet: nil) }
-        }
-        let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
-        var titleHits: [PaletteItem] = []
-        var bodyHits: [PaletteItem] = []
-        for document in documents {
-            guard terms.allSatisfy({ document.body.range(of: $0, options: options) != nil }) else { continue }
-            let title = document.title
-            if terms.allSatisfy({ title.range(of: $0, options: options) != nil }) {
-                titleHits.append(.entry(document, snippet: nil))
-            } else {
-                bodyHits.append(.entry(document, snippet: snippet(in: document.body, around: terms[0])))
-            }
-        }
-        return Array((titleHits + bodyHits).prefix(50))
-    }
-
-    static func commands(query: String) -> [PaletteItem] {
-        let all: [PaletteItem] = AppCommand.allCases.filter { $0 != .commandPalette }.map { .command($0) } + [.settings]
-        let trimmed = query.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return all }
-        return all.filter { item in
-            title(for: item).range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive]) != nil
-        }
-    }
-
-    static func title(for item: PaletteItem) -> String {
-        switch item {
-        case .entry(let document, _): return document.title
-        case .command(let command): return command.title
-        case .settings: return "Settings…"
-        }
-    }
-
-    private static func snippet(in body: String, around term: String) -> String? {
-        guard let range = body.range(of: term, options: [.caseInsensitive, .diacriticInsensitive]) else { return nil }
-        let start = body.index(range.lowerBound, offsetBy: -40, limitedBy: body.startIndex) ?? body.startIndex
-        let end = body.index(range.upperBound, offsetBy: 60, limitedBy: body.endIndex) ?? body.endIndex
-        let text = body[start..<end].replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
-        return (start > body.startIndex ? "…" : "") + text + (end < body.endIndex ? "…" : "")
-    }
-}
+import AppKit
 
 struct CommandPaletteView: View {
-    let documents: [PaletteDocument]?
+    /// nil while the entries are still being read.
+    let index: PaletteIndex?
     let shortcutsJSON: String
-    let colorScheme: ColorScheme
     let onSelect: (PaletteItem) -> Void
     let onDismiss: () -> Void
 
+    private struct SearchKey: Equatable {
+        let query: String
+        let indexID: UUID?
+    }
+
     @State private var query = ""
-    /// Search results, recomputed only when the query or the documents change.
     @State private var results: [PaletteItem] = []
+    /// What `results` was computed for; "No matches" only shows once the current search finished.
+    @State private var resultsKey: SearchKey?
     /// Tracked by id so results arriving later don't change what Return opens.
     @State private var highlightedID: String?
-    @FocusState private var searchFocused: Bool
+    /// Pointer location at the last keyboard move or list change. Hover only moves the highlight
+    /// once the pointer leaves it, so rows scrolling under a resting pointer can't steal it.
+    @State private var pinnedPointer: CGPoint?
     @State private var listHeight: CGFloat = 0
+    /// ↩ pressed before the current query's search finished (the value is "alternate");
+    /// performed as soon as its results arrive, so Return never opens a stale result.
+    @State private var pendingSubmit: Bool?
 
-    /// Empty query: recent entries, then every action. Otherwise: matching actions, then entries.
-    private static func search(_ query: String, in documents: [PaletteDocument]) -> [PaletteItem] {
-        if query.trimmingCharacters(in: .whitespaces).isEmpty {
-            return Array(PaletteSearch.entries(documents, query: "").prefix(8)) + PaletteSearch.commands(query: "")
-        }
-        return Array(PaletteSearch.commands(query: query).prefix(4)) + PaletteSearch.entries(documents, query: query)
-    }
-
-    private func updateResults() {
-        results = Self.search(query, in: documents ?? [])
-    }
+    private var searchKey: SearchKey { SearchKey(query: query, indexID: index?.id) }
 
     /// The highlighted item, falling back to the first one.
-    private var highlightedItemID: String? {
-        if let highlightedID, results.contains(where: { $0.id == highlightedID }) {
-            return highlightedID
+    private var highlightedItem: PaletteItem? {
+        if let highlightedID, let item = results.first(where: { $0.id == highlightedID }) {
+            return item
         }
-        return results.first?.id
+        return results.first
     }
 
     var body: some View {
         ZStack(alignment: .top) {
-            Color.black.opacity(colorScheme == .light ? 0.12 : 0.4)
+            // Clear hit area: clicking outside the card closes the palette.
+            Color.clear
+                .contentShape(Rectangle())
                 .ignoresSafeArea()
                 .onTapGesture(perform: onDismiss)
+                .accessibilityHidden(true)
 
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass")
                         .foregroundStyle(.secondary)
-                    TextField("Search entries or actions", text: $query)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 16))
-                        .focused($searchFocused)
-                        .accessibilityIdentifier("commandPaletteSearch")
-                        .onKeyPress(.downArrow) { move(1); return .handled }
-                        .onKeyPress(.upArrow) { move(-1); return .handled }
-                        .onKeyPress(.escape) { onDismiss(); return .handled }
-                        .onSubmit(selectHighlighted)
-                    if documents == nil {
+                    PaletteSearchField(
+                        text: $query,
+                        onMove: move,
+                        onJump: jump,
+                        onSubmit: submit,
+                        onCancel: onDismiss
+                    )
+                    .frame(maxWidth: .infinity)
+                    if index == nil {
                         ProgressView().controlSize(.small)
                     }
                 }
@@ -153,36 +75,14 @@ struct CommandPaletteView: View {
 
                 Divider()
 
-                let items = results
-                if items.isEmpty {
-                    Text(documents == nil ? "Loading entries…" : "No matches")
+                if results.isEmpty {
+                    Text(index == nil ? "Loading entries…" : resultsKey == searchKey ? "No matches" : " ")
                         .foregroundStyle(.secondary)
                         .font(.system(size: 13))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 24)
                 } else {
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            LazyVStack(spacing: 2) {
-                                ForEach(items) { item in
-                                    row(for: item, highlighted: item.id == highlightedItemID)
-                                        .id(item.id)
-                                        .contentShape(Rectangle())
-                                        .onTapGesture { onSelect(item) }
-                                        .onHover { if $0 { highlightedID = item.id } }
-                                }
-                            }
-                            .padding(6)
-                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
-                        }
-                        // Shrink to the rows; scroll only past 380 pt.
-                        .frame(height: min(max(listHeight, 1), 380))
-                        .onChange(of: highlightedID) { _, id in
-                            if let id {
-                                proxy.scrollTo(id)
-                            }
-                        }
-                    }
+                    resultsList
                 }
             }
             .frame(width: 580)
@@ -190,17 +90,56 @@ struct CommandPaletteView: View {
             .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.primary.opacity(0.08)))
             .shadow(color: .black.opacity(0.2), radius: 30, y: 12)
             .padding(.top, 90)
+            .accessibilityAddTraits(.isModal)
         }
-        .onAppear {
-            updateResults()
-            searchFocused = true
-        }
+        .onAppear(perform: pinPointer)
         .onChange(of: query) {
             highlightedID = nil
-            updateResults()
+            pinPointer()
         }
-        .onChange(of: documents) { updateResults() }
-        .accessibilityAddTraits(.isModal)
+        // Restarts (and cancels the previous search) on every keystroke and when the entries arrive.
+        .task(id: searchKey) {
+            let key = searchKey
+            let found = await PaletteSearch.run(key.query, in: index ?? .empty)
+            guard !Task.isCancelled else { return }
+            results = found
+            resultsKey = key
+            pinPointer()
+            if let alternate = pendingSubmit {
+                pendingSubmit = nil
+                submit(alternate: alternate)
+            }
+        }
+    }
+
+    private var resultsList: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(results) { item in
+                        row(for: item, highlighted: item.id == highlightedItem?.id)
+                            .id(item.id)
+                            .contentShape(Rectangle())
+                            .onTapGesture { onSelect(item) }
+                            .onContinuousHover { phase in
+                                guard case .active = phase else { return }
+                                let pointer = NSEvent.mouseLocation
+                                guard pointer != pinnedPointer else { return }
+                                pinnedPointer = nil
+                                if highlightedID != item.id { highlightedID = item.id }
+                            }
+                            .accessibilityAction { onSelect(item) }
+                    }
+                }
+                .padding(6)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
+            }
+            // Shrink to the rows; scroll only past 380 pt.
+            .frame(height: min(max(listHeight, 1), 380))
+            .onChange(of: highlightedItem?.id) { _, id in
+                if let id { proxy.scrollTo(id) }
+            }
+        }
     }
 
     @ViewBuilder
@@ -208,7 +147,7 @@ struct CommandPaletteView: View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Image(systemName: icon(for: item))
                 .frame(width: 16)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(highlighted ? Color.accentColor : .secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(PaletteSearch.title(for: item))
                     .font(.system(size: 14))
@@ -229,7 +168,7 @@ struct CommandPaletteView: View {
         .padding(.vertical, 7)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(highlighted ? Color.primary.opacity(0.08) : .clear)
+                .fill(highlighted ? Color.accentColor.opacity(0.2) : .clear)
         )
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(highlighted ? .isSelected : [])
@@ -253,15 +192,128 @@ struct CommandPaletteView: View {
         }
     }
 
+    private func pinPointer() {
+        pinnedPointer = NSEvent.mouseLocation
+    }
+
+    /// ↑/↓: moves the highlight, wrapping at both ends.
     private func move(_ delta: Int) {
         let count = results.count
         guard count > 0 else { return }
-        let current = results.firstIndex(where: { $0.id == highlightedItemID }) ?? 0
-        highlightedID = results[(current + delta + count) % count].id
+        let current = results.firstIndex(where: { $0.id == highlightedItem?.id }) ?? 0
+        highlight(results[(current + delta + count) % count])
     }
 
-    private func selectHighlighted() {
-        guard let item = results.first(where: { $0.id == highlightedItemID }) else { return }
-        onSelect(item)
+    /// ⌘↑/⌘↓: first or last row.
+    private func jump(toEnd: Bool) {
+        guard let item = toEnd ? results.last : results.first else { return }
+        highlight(item)
+    }
+
+    private func highlight(_ item: PaletteItem) {
+        highlightedID = item.id
+        pinPointer()
+        AccessibilityNotification.Announcement(PaletteSearch.title(for: item)).post()
+    }
+
+    /// ↩ opens the highlighted row. ⌘↩ on a sealed version opens the entry's current version instead.
+    private func submit(alternate: Bool) {
+        guard resultsKey == searchKey else {
+            pendingSubmit = alternate
+            return
+        }
+        guard let item = highlightedItem else { return }
+        if alternate, case .entry(var document, _) = item, document.version != nil {
+            document.version = nil
+            onSelect(.entry(document, snippet: nil))
+        } else {
+            onSelect(item)
+        }
+    }
+}
+
+/// The search field. An AppKit text field so ↑/↓/↩/Esc arrive as text commands
+/// (`moveUp:`, `insertNewline:`, …) instead of depending on SwiftUI focus and key-press timing.
+private struct PaletteSearchField: NSViewRepresentable {
+    @Binding var text: String
+    let onMove: (Int) -> Void
+    let onJump: (_ toEnd: Bool) -> Void
+    let onSubmit: (_ alternate: Bool) -> Void
+    let onCancel: () -> Void
+
+    func makeNSView(context: Context) -> PaletteTextField {
+        let field = PaletteTextField()
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = .systemFont(ofSize: 16)
+        field.placeholderString = "Search entries or actions"
+        field.usesSingleLineMode = true
+        field.cell?.isScrollable = true
+        field.cell?.wraps = false
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        field.delegate = context.coordinator
+        field.setAccessibilityLabel("Search entries and actions")
+        field.setAccessibilityIdentifier("commandPaletteSearch")
+        return field
+    }
+
+    func updateNSView(_ field: PaletteTextField, context: Context) {
+        context.coordinator.parent = self
+        if field.stringValue != text {
+            field.stringValue = text
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: PaletteSearchField
+
+        init(parent: PaletteSearchField) {
+            self.parent = parent
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            parent.text = field.stringValue
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            // Let an input method finish composing first.
+            if textView.hasMarkedText() { return false }
+            // ⌘↩ has no standard binding (the field editor sends `noop:`), so check the event itself.
+            if let event = NSApp.currentEvent, event.type == .keyDown,
+               event.keyCode == 36 || event.keyCode == 76,
+               event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command {
+                parent.onSubmit(true)
+                return true
+            }
+            switch selector {
+            case #selector(NSResponder.moveDown(_:)): parent.onMove(1)
+            case #selector(NSResponder.moveUp(_:)): parent.onMove(-1)
+            case #selector(NSResponder.moveToBeginningOfDocument(_:)): parent.onJump(false)
+            case #selector(NSResponder.moveToEndOfDocument(_:)): parent.onJump(true)
+            case #selector(NSResponder.insertNewline(_:)): parent.onSubmit(false)
+            case #selector(NSResponder.cancelOperation(_:)): parent.onCancel()
+            default: return false
+            }
+            return true
+        }
+    }
+}
+
+/// Takes first responder as soon as it's in a window.
+private final class PaletteTextField: NSTextField {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.window === window else { return }
+            window.makeFirstResponder(self)
+        }
     }
 }

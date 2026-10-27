@@ -128,7 +128,7 @@ struct ContentView: View {
     /// Hex progress or failure per video entry; only the selected entry's is shown.
     @State private var transcriptionStatuses: [UUID: String] = [:]
     @State private var showingCommandPalette = false
-    @State private var paletteDocuments: [PaletteDocument]? = nil
+    @State private var paletteIndex: PaletteIndex? = nil
     /// Identifies the palette opening a document read belongs to, so a slower read from an
     /// earlier opening can't replace newer results.
     @State private var paletteLoadID: UUID? = nil
@@ -926,9 +926,9 @@ struct ContentView: View {
     private func openCommandPalette() {
         let loadID = UUID()
         paletteLoadID = loadID
-        paletteDocuments = nil
+        paletteIndex = nil
         showingCommandPalette = true
-        // Read every entry's text (or video transcript) off the main thread.
+        // Read and fold every entry's text (or video transcript) off the main thread.
         let sources: [(entry: HumanEntry, url: URL?)] = entries.map { entry in
             if entry.entryType == .video {
                 return (entry, resolvedVideoFilename(for: entry).map(getVideoTranscriptURL(for:)))
@@ -937,8 +937,8 @@ struct ContentView: View {
         }
         let store = versionStore
         Task {
-            let documents = await Task.detached(priority: .userInitiated) {
-                sources.flatMap { source in
+            let index = await Task.detached(priority: .userInitiated) {
+                PaletteIndex(sources.flatMap { source in
                     let current = PaletteDocument(
                         id: source.entry.id,
                         date: source.entry.date,
@@ -957,10 +957,10 @@ struct ContentView: View {
                         )
                     }
                     return [current] + sealed
-                }
+                })
             }.value
             if showingCommandPalette && paletteLoadID == loadID {
-                paletteDocuments = documents
+                paletteIndex = index
             }
         }
     }
@@ -1843,9 +1843,8 @@ struct ContentView: View {
         .overlay {
             if showingCommandPalette {
                 CommandPaletteView(
-                    documents: paletteDocuments,
+                    index: paletteIndex,
                     shortcutsJSON: shortcutsJSON,
-                    colorScheme: colorScheme,
                     onSelect: performPaletteItem,
                     onDismiss: { showingCommandPalette = false }
                 )
