@@ -166,39 +166,8 @@ struct ContentView: View {
     private let fileManager = FileManager.default
     private let saveTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
     
-    // Add cached documents directory
-    private let documentsDirectory: URL = {
-        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Freewrite")
-        
-        // Create Freewrite directory if it doesn't exist
-        if !FileManager.default.fileExists(atPath: directory.path) {
-            do {
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                print("Successfully created Freewrite directory")
-            } catch {
-                print("Error creating directory: \(error)")
-            }
-        }
-        
-        return directory
-    }()
-
-    private let videosDirectory: URL = {
-        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Freewrite")
-            .appendingPathComponent("Videos")
-
-        if !FileManager.default.fileExists(atPath: directory.path) {
-            do {
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                print("Successfully created Freewrite/Videos directory")
-            } catch {
-                print("Error creating videos directory: \(error)")
-            }
-        }
-
-        return directory
-    }()
+    // Entries folder (default container folder or the one picked in Settings › Storage)
+    private let storage = EntryStorage.shared
 
     private let thumbnailMemoryCache: NSCache<NSString, NSImage> = {
         let cache = NSCache<NSString, NSImage>()
@@ -233,13 +202,12 @@ struct ContentView: View {
     Here's my journal entry:
     """
     
-    // Modify getDocumentsDirectory to use cached value
     private func getDocumentsDirectory() -> URL {
-        return documentsDirectory
+        storage.rootURL
     }
 
     private func getVideosDirectory() -> URL {
-        return videosDirectory
+        storage.videosURL
     }
 
     private func getVideoEntryDirectory(for videoFilename: String) -> URL {
@@ -468,29 +436,7 @@ struct ContentView: View {
     }
     
     private func parseCanonicalEntryFilename(_ filename: String) -> (uuid: UUID, timestamp: Date)? {
-        guard filename.hasPrefix("["),
-              filename.hasSuffix("].md"),
-              let divider = filename.range(of: "]-[") else {
-            return nil
-        }
-
-        let uuidStart = filename.index(after: filename.startIndex)
-        let uuidString = String(filename[uuidStart..<divider.lowerBound])
-        guard let uuid = UUID(uuidString: uuidString) else {
-            return nil
-        }
-
-        let timestampStart = divider.upperBound
-        let timestampEnd = filename.index(filename.endIndex, offsetBy: -4) // before ".md"
-        let timestampString = String(filename[timestampStart..<timestampEnd])
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd-HH-mm-ss"
-        guard let timestamp = formatter.date(from: timestampString) else {
-            return nil
-        }
-
-        return (uuid: uuid, timestamp: timestamp)
+        StorageTransfer.parseEntryFilename(filename)
     }
     
     private func isEntryNewer(_ lhs: HumanEntry, than rhs: HumanEntry) -> Bool {
@@ -1625,6 +1571,7 @@ struct ContentView: View {
                                                         .buttonStyle(.plain)
                                                         .accessibilityLabel("Delete entry")
                                                         .accessibilityIdentifier("deleteEntryButton")
+                                                        .disabled(storage.isTransferring)
                                                         .onHover { hovering in
                                                             withAnimation(.easeInOut(duration: 0.2)) {
                                                                 hoveredTrashId = hovering ? entry.id : nil
@@ -1721,6 +1668,19 @@ struct ContentView: View {
         }
         .onDisappear {
             WritingWindow.openCount -= 1
+        }
+        .onChange(of: storage.rootURL) {
+            // The entries folder changed in Settings; show what's in the new one.
+            currentVideoURL = nil
+            loadExistingEntries()
+        }
+        .alert("Entries Folder Unavailable", isPresented: Binding(
+            get: { storage.unavailableFolderNotice != nil },
+            set: { if !$0 { storage.unavailableFolderNotice = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(storage.unavailableFolderNotice ?? "")
         }
         .onChange(of: sessionMinutes) { _, minutes in
             if !timerIsRunning {
@@ -2031,7 +1991,7 @@ struct ContentView: View {
                 }
 
                 if TranscriptionEngine.current == .hex {
-                    transcribeWithHex(videoURL: videoDestURL, transcriptURL: transcriptURL, entryId: videoEntry.id)
+                    transcribeWithHex(videoURL: videoDestURL, entryId: videoEntry.id)
                 }
 
                 if replacementEntry != nil {
@@ -2047,14 +2007,15 @@ struct ContentView: View {
 
     /// Replaces the saved transcript with Hex's once it finishes. On failure the live Apple
     /// transcript (if any) stays, and the reason shows briefly in the bottom bar.
-    private func transcribeWithHex(videoURL: URL, transcriptURL: URL, entryId: UUID) {
+    /// `videoURL` is where the recording was saved; the transcript goes next to it, and next to
+    /// its copy if the entries folder was moved or copied while Hex was working.
+    private func transcribeWithHex(videoURL: URL, entryId: UUID) {
         transcriptionStatuses[entryId] = "Transcribing with Hex…"
         Task {
             do {
                 let transcript = try await HexTranscriber.transcribe(mediaURL: videoURL)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                if !transcript.isEmpty {
-                    try transcript.write(to: transcriptURL, atomically: true, encoding: .utf8)
+                if !transcript.isEmpty && saveHexTranscript(transcript, forRecordingAt: videoURL) {
                     if let index = entries.firstIndex(where: { $0.id == entryId }) {
                         entries[index].previewText = previewTextFromTranscript(transcript)
                     }
@@ -2075,7 +2036,39 @@ struct ContentView: View {
         }
     }
 
+    /// Writes `transcript` into every folder that still holds the recording: where it was saved
+    /// and, after a folder move/copy, its counterpart in the current entries folder. Write
+    /// failures are logged. Returns whether any copy was written.
+    private func saveHexTranscript(_ transcript: String, forRecordingAt videoURL: URL) -> Bool {
+        let videoFilename = videoURL.lastPathComponent
+        var directories = [videoURL.deletingLastPathComponent()]
+        let currentDirectory = getVideoEntryDirectory(for: videoFilename)
+        if !EntryStorage.isSameFolder(currentDirectory, directories[0]) {
+            directories.append(currentDirectory)
+        }
+        var saved = false
+        for directory in directories
+        where fileManager.fileExists(atPath: directory.appendingPathComponent(videoFilename).path) {
+            let transcriptURL = directory.appendingPathComponent("transcript.md")
+            do {
+                try transcript.write(to: transcriptURL, atomically: true, encoding: .utf8)
+                saved = true
+            } catch {
+                print("Hex: couldn't save transcript to \(transcriptURL.path): \(error)")
+            }
+        }
+        if !saved {
+            print("Hex: transcript not saved; the recording \(videoFilename) is no longer where it was saved or in the entries folder")
+        }
+        return saved
+    }
+
     private func deleteEntry(entry: HumanEntry) {
+        // A transfer in progress would copy the entry back into the new folder.
+        guard !storage.isTransferring else {
+            NSSound.beep()
+            return
+        }
         // Delete the file from the filesystem
         let documentsDirectory = getDocumentsDirectory()
         let fileURL = documentsDirectory.appendingPathComponent(entry.filename)
