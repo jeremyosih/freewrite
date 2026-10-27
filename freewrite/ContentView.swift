@@ -105,6 +105,7 @@ struct ContentView: View {
     /// Font and size of new pages (Settings › General); a page can have its own (`pageWriting`).
     @AppStorage(SettingsKey.fontName) private var defaultFontName: String = WritingFont.defaultName
     @AppStorage(SettingsKey.fontSize) private var defaultFontSize: Double = WritingFont.defaultSize
+    @AppStorage(FavoriteFonts.key) private var favoriteFontsJSON = ""
     @AppStorage(SettingsKey.colorScheme) private var colorSchemeSetting: String = "light"
     @AppStorage(SettingsKey.sessionMinutes) private var sessionMinutes: Int = 15
     @State private var keyDownMonitor: Any?
@@ -1156,6 +1157,10 @@ struct ContentView: View {
             toggleComments()
         case .insertTemplate:
             insertTemplate()
+        case .newReviewerByChat:
+            // The chat opens as a sheet on Settings › Agents, where its reviewer gets selected on Save.
+            ReviewerChatLauncher.shared.open()
+            openReviewerSettings()
         }
     }
 
@@ -2020,8 +2025,10 @@ struct ContentView: View {
                         guard keyDownMonitor == nil else { return }
                         keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                             // Check if backspace is disabled and the key is delete/backspace
-                            // Only the writing editor: leave the palette search and the Settings window alone.
-                            let isSettingsWindow = event.window?.identifier?.rawValue.contains("Settings") == true
+                            // Only the writing editor: leave the palette search and the Settings window (and its sheets) alone.
+                            let isSettingsWindow = [event.window, event.window?.sheetParent].contains {
+                                $0?.identifier?.rawValue.contains("Settings") == true
+                            }
                             // Plain Backspace may still edit a "/" template query (never the "/" or the text before it);
                             // ⌘/⌥/⌃ deletions reach past the query, so they stay blocked.
                             let plainBackspace = event.keyCode == 51
@@ -2731,12 +2738,14 @@ struct ContentView: View {
         updatePageWriting { $0.font = name }
     }
 
-    /// Any installed family other than the presets and the current font.
+    /// Any installed family other than the favorites and the current font.
     private func chooseRandomFont() {
-        let presets = Set(WritingFont.presets.map(\.name))
-        let current = selectedFont
+        // By family, so the default "Lato-Regular" also rules out "Lato".
+        let family = { (name: String) in NSFont(name: name, size: 12)?.familyName ?? name }
+        let favorites = Set(FavoriteFonts.decode(favoriteFontsJSON).map(family))
+        let current = family(selectedFont)
         guard let random = NSFontManager.shared.availableFontFamilies
-            .filter({ !presets.contains($0) && $0 != current })
+            .filter({ !favorites.contains($0) && $0 != current })
             .randomElement() else { return }
         setPageFont(random)
     }
@@ -2802,17 +2811,18 @@ struct ContentView: View {
         .barMenuAnchor(.item(.font))
     }
 
-    /// Lato · Arial · System · Serif, the page's other font if it has one, Random, and back to
-    /// the defaults.
+    /// The favorite fonts (Settings › General), the page's other font if it has one, Random, and
+    /// back to the defaults.
     private var fontMenuContent: BarMenuContent {
         let current = selectedFont
-        var fonts = WritingFont.presets.map { preset in
-            BarMenuAction(id: "fontRow-\(preset.label)", title: preset.label, isChecked: preset.name == current) {
-                setPageFont(preset.name)
+        let favorites = FavoriteFonts.decode(favoriteFontsJSON)
+        var fonts = favorites.map { name in
+            BarMenuAction(id: "fontRow-\(name)", title: FavoriteFonts.label(for: name), isChecked: name == current) {
+                setPageFont(name)
             }
         }
-        if !WritingFont.presets.contains(where: { $0.name == current }) {
-            fonts.append(BarMenuAction(id: "fontRow-current", title: current, isChecked: true) {})
+        if !favorites.contains(current) {
+            fonts.append(BarMenuAction(id: "fontRow-current", title: FavoriteFonts.label(for: current), isChecked: true) {})
         }
         fonts.append(BarMenuAction(id: "fontRow-random", title: "Random", trailingSymbol: "shuffle") {
             chooseRandomFont()
