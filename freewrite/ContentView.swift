@@ -1989,10 +1989,13 @@ struct ContentView: View {
                             // Check if backspace is disabled and the key is delete/backspace
                             // Only the writing editor: leave the palette search and the Settings window alone.
                             let isSettingsWindow = event.window?.identifier?.rawValue.contains("Settings") == true
-                            // Backspace may still edit a "/" template query (never the "/" or the text before it).
+                            // Plain Backspace may still edit a "/" template query (never the "/" or the text before it);
+                            // ⌘/⌥/⌃ deletions reach past the query, so they stay blocked.
+                            let plainBackspace = event.keyCode == 51
+                                && event.modifierFlags.intersection([.command, .option, .control]).isEmpty
                             if backspaceDisabled && !showingCommandPalette && !isSettingsWindow
                                 && (event.keyCode == 51 || event.keyCode == 117)
-                                && !(event.keyCode == 51 && templateMenu.allowsBackspace) {
+                                && !(plainBackspace && templateMenu.allowsBackspace) {
                                 // Block the backspace/delete key
                                 return nil
                             }

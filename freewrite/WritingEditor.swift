@@ -240,6 +240,8 @@ struct WritingEditor: NSViewRepresentable {
                 menu.open(slash: slash, queryStart: slash + 1, anchor: anchorRect(at: slash, hasSlash: true), in: textView.window)
             }
             guard let session = menu.session else { return }
+            // Mid-composition (IME) the menu is suspended: the query is read again once the text is committed.
+            if textView.hasMarkedText() { return }
             guard textView.isEditable,
                   let query = SlashTrigger.query(in: string, slashAt: session.slash, queryStart: session.queryStart, caret: textView.selectedRange()) else {
                 menu.close()
@@ -296,7 +298,8 @@ struct WritingEditor: NSViewRepresentable {
         }
 
         func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-            guard let menu = templateMenu, menu.isOpen else { return false }
+            // Keys during composition belong to the input method, not the menu.
+            guard let menu = templateMenu, menu.isOpen, !textView.hasMarkedText() else { return false }
             switch selector {
             case #selector(NSResponder.moveDown(_:)):
                 menu.move(1)
