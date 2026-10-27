@@ -260,9 +260,13 @@ struct NoteCipher: Sendable {
 
     var primary: NoteKey? { keys[primaryID] }
 
-    /// Seals with `keyID` (the key a note was locked with) or, if unknown, the primary key.
-    func seal(_ plaintext: Data, keyID: Data? = nil) throws -> Data {
-        guard let key = keyID.flatMap({ keys[$0] }) ?? primary else { throw NoteLockError.unknownKey }
+    /// Seals with `keyID` (the key a note was locked with) or, if nil, the primary key. Never
+    /// falls back to another key: a note must stay openable with one key and one recovery key.
+    /// `recoveryWrap` replaces the key's own wrap (the one the note's files already carry).
+    func seal(_ plaintext: Data, keyID: Data? = nil, recoveryWrap: Data? = nil) throws -> Data {
+        let found = keyID.map { keys[$0] } ?? primary
+        guard var key = found else { throw NoteLockError.unknownKey }
+        if let recoveryWrap { key.recoveryWrap = recoveryWrap }
         return try LockedFileFormat.seal(plaintext, with: key)
     }
 
@@ -412,13 +416,16 @@ protocol NoteDeviceKeyProvider: AnyObject {
     func authenticate(reason: String) async throws
     /// The device key, usable without another prompt after `authenticate`.
     func key(from data: Data) throws -> any NoteDeviceKey
-    /// Forgets the authentication (the next `key(from:)` needs `authenticate` again).
+    /// Forgets the authentication (the next `key(from:)` needs `authenticate` again) and cancels
+    /// one still waiting for the user.
     func invalidate()
 }
 
 @MainActor
 final class SecureEnclaveKeyProvider: NoteDeviceKeyProvider {
     private var context: LAContext?
+    /// Prompts still waiting for the user; `invalidate()` cancels them.
+    private var pending: [LAContext] = []
 
     var isAvailable: Bool { SecureEnclave.isAvailable }
 
@@ -443,6 +450,8 @@ final class SecureEnclaveKeyProvider: NoteDeviceKeyProvider {
         let context = LAContext()
         // A Touch ID unlock of the Mac a few seconds ago counts; anything older asks again.
         context.touchIDAuthenticationAllowableReuseDuration = 10
+        pending.append(context)
+        defer { pending.removeAll { $0 === context } }
         do {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, error in
@@ -453,9 +462,10 @@ final class SecureEnclaveKeyProvider: NoteDeviceKeyProvider {
                     }
                 }
             }
-        } catch let error as LAError where [.userCancel, .appCancel, .systemCancel, .userFallback].contains(error.code) {
+        } catch let error as LAError where [.userCancel, .appCancel, .systemCancel, .userFallback, .invalidContext].contains(error.code) {
             throw NoteLockError.cancelled
         }
+        self.context?.invalidate()
         self.context = context
     }
 
@@ -467,6 +477,7 @@ final class SecureEnclaveKeyProvider: NoteDeviceKeyProvider {
     func invalidate() {
         context?.invalidate()
         context = nil
+        pending.forEach { $0.invalidate() }
     }
 }
 
@@ -476,6 +487,8 @@ final class SoftwareKeyProvider: NoteDeviceKeyProvider {
     var isAvailable: Bool { true }
     var methodName: String { "a test key" }
     var allowsAuthentication = true
+    /// Runs while the "prompt" is up (e.g. to close locked notes meanwhile).
+    var whileAuthenticating: (() -> Void)?
     private(set) var authenticationCount = 0
     private var isAuthenticated = false
 
@@ -486,6 +499,7 @@ final class SoftwareKeyProvider: NoteDeviceKeyProvider {
 
     func authenticate(reason: String) async throws {
         guard allowsAuthentication else { throw NoteLockError.cancelled }
+        whileAuthenticating?()
         authenticationCount += 1
         isAuthenticated = true
     }
@@ -609,10 +623,11 @@ final class NoteLockSession {
     func lock() {
         // Counted even when nothing was open, so views can hide secrets (e.g. a recovery key).
         lockCount += 1
+        // Also cancels a prompt still waiting for the user.
+        provider.invalidate()
         guard cipher != nil || keyring != nil else { return }
         keyring = nil
         cipher = nil
-        provider.invalidate()
     }
 
     /// Always asks, even while open.
@@ -651,15 +666,17 @@ final class NoteLockSession {
         )
     }
 
-    /// Adds every content key that `recovery` unwraps from `wraps` (key id → recovery wrap, read
-    /// from locked files' headers). If this Mac's vault can't be read or its device key can't be
+    /// Adds every content key that `recovery` unwraps from `wraps` (key id → recovery wraps, read
+    /// from locked files' headers; any one of a key's wraps that opens is enough). If this Mac's vault can't be read or its device key can't be
     /// used (e.g. restored from another Mac), a new vault is made from the recovered keys; the
     /// old file is kept next to it (`replacedVaultBackup`), never deleted.
-    func importKeys(with recovery: RecoveryKey, from wraps: [Data: Data]) async throws -> RecoveryImport {
+    func importKeys(with recovery: RecoveryKey, from wraps: [Data: [Data]]) async throws -> RecoveryImport {
         guard !wraps.isEmpty else { return RecoveryImport(added: 0, replacedVaultBackup: nil, stillUnknown: 0) }
         let recovered: [(id: Data, key: SymmetricKey, wrap: Data)] = wraps
             .sorted(by: { $0.key.base64EncodedString() < $1.key.base64EncodedString() })
-            .compactMap { id, wrap in (try? recovery.unwrap(wrap, keyID: id)).map { (id, $0, wrap) } }
+            .compactMap { id, candidates in
+                candidates.lazy.compactMap { wrap in (try? recovery.unwrap(wrap, keyID: id)).map { (id, $0, wrap) } }.first
+            }
         guard !recovered.isEmpty else { throw NoteLockError.wrongRecoveryKey }
 
         // The keyring this Mac has now, if it can still be opened.
@@ -667,7 +684,7 @@ final class NoteLockSession {
         if let openKeyring = keyring {
             existing = openKeyring
         } else if let vault {
-            try await provider.authenticate(reason: "add your recovery key")
+            try await authenticate(reason: "add your recovery key")
             existing = try? openVault(vault)
         }
 
@@ -752,8 +769,19 @@ final class NoteLockSession {
 
     private func authenticatedKeyring(reason: String) async throws -> NoteKeyring {
         guard let vault else { throw vaultError == nil ? NoteLockError.noVault : NoteLockError.damaged }
-        try await provider.authenticate(reason: reason)
+        try await authenticate(reason: reason)
         return try openVault(vault)
+    }
+
+    /// Asks for the user. A reply that arrives after locked notes closed (Lock Now, idle, sleep,
+    /// screen lock while the prompt was up) doesn't count: it throws `.cancelled` and is forgotten.
+    private func authenticate(reason: String) async throws {
+        let generation = lockCount
+        try await provider.authenticate(reason: reason)
+        guard lockCount == generation else {
+            provider.invalidate()
+            throw NoteLockError.cancelled
+        }
     }
 
     /// After `authenticate`. Fails with `.deviceKeyUnusable` when the device key isn't this
@@ -864,12 +892,15 @@ extension EntryVersionStore {
             .sorted()
     }
 
-    /// Key id → recovery wrap of every locked entry in the folder (read from the headers).
-    func recoveryWraps() -> [Data: Data] {
-        var wraps: [Data: Data] = [:]
+    /// Key id → every distinct recovery wrap the folder's locked entries carry for it (read from
+    /// the headers). One key can have several: notes a recovery-key change couldn't update, or
+    /// copies from an older backup.
+    func recoveryWraps() -> [Data: [Data]] {
+        var wraps: [Data: [Data]] = [:]
         for filename in lockedEntryFilenames() {
-            if let header = try? LockedFileFormat.header(ofFileAt: lockedEntryFileURL(for: filename)) {
-                wraps[header.keyID] = header.recoveryWrap
+            if let header = try? LockedFileFormat.header(ofFileAt: lockedEntryFileURL(for: filename)),
+               wraps[header.keyID]?.contains(header.recoveryWrap) != true {
+                wraps[header.keyID, default: []].append(header.recoveryWrap)
             }
         }
         return wraps
@@ -993,6 +1024,10 @@ extension EntryVersionStore {
         guard let cipher, isLocked(entryFilename) else { return LeftoverPlainFiles() }
         var result = LeftoverPlainFiles()
         let lockedTop = lockedEntryFileURL(for: entryFilename)
+        // Nothing changes unless this Mac has the note's own key (one locked with another
+        // Mac's key needs its recovery key first).
+        let header = try LockedFileFormat.header(ofFileAt: lockedTop)
+        guard cipher.keys[header.keyID] != nil else { throw NoteLockError.unknownKey }
         let plainTop = entryFileURL(for: entryFilename)
         if let plain = try? Data(contentsOf: plainTop) {
             let decrypted = try cipher.open(Data(contentsOf: lockedTop))
@@ -1021,11 +1056,10 @@ extension EntryVersionStore {
                 result.kept.append(plainURL)
             }
         }
-        let keyID = try LockedFileFormat.header(ofFileAt: lockedTop).keyID
         for orphan in plainFiles(of: entryFilename) where !FileManager.default.fileExists(atPath: lockedURL(for: orphan, entryFilename: entryFilename).path) {
             let plain = try Data(contentsOf: orphan)
             let target = lockedURL(for: orphan, entryFilename: entryFilename)
-            try lockFileOperations.write(cipher.seal(plain, keyID: keyID), to: target)
+            try lockFileOperations.write(cipher.seal(plain, keyID: header.keyID, recoveryWrap: header.recoveryWrap), to: target)
             guard try cipher.open(Data(contentsOf: target)) == plain else {
                 try? lockFileOperations.removeItem(at: target)
                 throw NoteLockError.verificationFailed

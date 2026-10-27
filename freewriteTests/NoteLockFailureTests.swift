@@ -457,3 +457,81 @@ struct LockCountTests {
         #expect(session.lockCount == 2)
     }
 }
+
+// MARK: - Second review round (findings: reopen after lock, stale wraps, shared key ids, wrong key)
+
+@MainActor
+struct SecondReviewRoundTests {
+    private func makeSession(provider: SoftwareKeyProvider = SoftwareKeyProvider()) throws -> NoteLockSession {
+        NoteLockSession(vaultURL: try makeFolder().appendingPathComponent("vault.json"), provider: provider)
+    }
+
+    @Test func aPromptAnsweredAfterLockingDoesntReopen() async throws {
+        let provider = SoftwareKeyProvider()
+        let session = try makeSession(provider: provider)
+        try session.createVault(recovery: .generate())
+        session.lock()
+        provider.whileAuthenticating = { session.lock() }  // Lock Now / screen lock while the prompt is up
+        await #expect(throws: NoteLockError.cancelled) { try await session.unlock() }
+        #expect(!session.isUnlocked)
+        await #expect(throws: NoteLockError.cancelled) { _ = try await session.recoveryKey() }
+        provider.whileAuthenticating = nil
+        try await session.unlock()
+        #expect(session.isUnlocked)
+    }
+
+    @Test func aCipherFromBeforeANewRecoveryKeyKeepsTheNewKey() async throws {
+        let session = try makeSession()
+        try session.createVault(recovery: .generate())
+        let folder = try makeFolder()
+        let before = EntryVersionStore(root: folder, cipher: session.cipher)  // e.g. a pending transcription
+        try makeEntry(in: before)
+        try before.lock(entryFilename: entry)
+        let rotation = try await session.replaceRecoveryKey { EntryVersionStore(root: folder, cipher: session.cipher) }
+        session.lock()
+
+        try before.saveTranscript("late words", forAudio: "audio/v1.m4a", entryFilename: entry)
+        try before.saveCurrentText("second draft\n\nlate words", for: entry)
+        #expect(try recoveryOpens(rotation.recoveryKey, entry, in: before))
+    }
+
+    @Test func everyWrapOfAKeyIsTried() async throws {
+        let recovery = RecoveryKey.generate()
+        let session = try makeSession()
+        try session.createVault(recovery: recovery)
+        let folder = try makeFolder()
+        let store = EntryVersionStore(root: folder, cipher: session.cipher)
+        try makeEntry(in: store)
+        try store.lock(entryFilename: entry)
+        let oldCopy = try Data(contentsOf: store.lockedEntryFileURL(for: entry))
+        try makeEntry(otherEntry, in: store)
+        try store.lock(entryFilename: otherEntry)
+        _ = try await session.replaceRecoveryKey { EntryVersionStore(root: folder, cipher: session.cipher) }
+        // One note comes back from an older backup, still carrying the old wrap.
+        try oldCopy.write(to: store.lockedEntryFileURL(for: entry))
+
+        let wraps = EntryVersionStore(root: folder).recoveryWraps()
+        #expect(wraps.count == 1 && wraps.values.first?.count == 2)
+        let fresh = try makeSession()
+        #expect(try await fresh.importKeys(with: recovery, from: wraps).added == 1)
+    }
+
+    @Test func cleanupRefusesANoteLockedWithAnotherKey() throws {
+        let folder = try makeFolder()
+        let macB = try makeSession()
+        try macB.createVault(recovery: .generate())
+        let storeB = EntryVersionStore(root: folder, cipher: macB.cipher)
+        try makeEntry(in: storeB)
+        try storeB.lock(entryFilename: entry)
+        let orphan = storeB.entryDirectory(for: entry).appendingPathComponent("audio/v2.transcript.md")
+        try "left behind".write(to: orphan, atomically: true, encoding: .utf8)
+
+        let macA = try makeSession()
+        try macA.createVault(recovery: .generate())
+        let storeA = EntryVersionStore(root: folder, cipher: macA.cipher)
+        let before = snapshot(folder)
+        #expect(throws: NoteLockError.unknownKey) { try storeA.reconcileLeftoverPlainFiles(of: entry) }
+        #expect(snapshot(folder) == before)
+        #expect(throws: NoteLockError.unknownKey) { try macA.cipher!.seal(Data("x".utf8), keyID: storeA.lockKeyID(of: entry)) }
+    }
+}

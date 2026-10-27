@@ -339,15 +339,19 @@ struct EntryVersionStore: Sendable {
         return try cipher.open(Data(contentsOf: lockedURL(for: url, entryFilename: entryFilename)))
     }
 
-    /// Writes atomically; a locked entry's file is encrypted with the key the entry was locked with.
+    /// Writes atomically; a locked entry's file is encrypted with the key the entry was locked
+    /// with and keeps the recovery wrap its top-level file carries. Only a recovery-key change
+    /// (`stageReseal`) changes that wrap, so a cipher captured before one can't bring the old
+    /// recovery key back.
     func writeData(_ data: Data, to url: URL, entryFilename: String) throws {
         guard isLocked(entryFilename) else {
             try data.write(to: url, options: .atomic)
             return
         }
         guard let cipher else { throw NoteLockError.locked }
-        let keyID = try LockedFileFormat.header(ofFileAt: lockedEntryFileURL(for: entryFilename)).keyID
-        try cipher.seal(data, keyID: keyID).write(to: lockedURL(for: url, entryFilename: entryFilename), options: .atomic)
+        let header = try LockedFileFormat.header(ofFileAt: lockedEntryFileURL(for: entryFilename))
+        try cipher.seal(data, keyID: header.keyID, recoveryWrap: header.recoveryWrap)
+            .write(to: lockedURL(for: url, entryFilename: entryFilename), options: .atomic)
     }
 
     func fileExists(_ url: URL, entryFilename: String) -> Bool {
