@@ -3156,6 +3156,11 @@ extension ContentView {
                 .opacity(0.6)
                 .padding(.horizontal, 12)
                 .padding(.top, 9)
+                .padding(.bottom, 2)
+            Text("Sends this entry's text to the reviewer's provider.")
+                .font(.system(size: 10))
+                .opacity(0.5)
+                .padding(.horizontal, 12)
                 .padding(.bottom, 4)
             ForEach(reviewerProfiles) { profile in
                 reviewMenuRow {

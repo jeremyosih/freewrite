@@ -32,7 +32,7 @@ struct AgentsSettingsView: View {
             } header: {
                 Text("Providers")
             } footer: {
-                Text("Keys and sign-ins are kept in your Mac's Keychain and only sent to the provider. Builds without a signing team (local development builds) may not be able to use the Keychain; you'll see an error here if so.")
+                Text("Reviews are the one feature that sends your writing off this Mac: the entry's versions go to the provider you choose (Anthropic or OpenAI), under their privacy terms. Nothing is sent until you start a review or turn on auto-run. Keys and sign-ins are kept in your Mac's Keychain and only sent to the provider. Builds without a signing team (local development builds) may not be able to use the Keychain; you'll see an error here if so.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
