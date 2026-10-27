@@ -17,6 +17,8 @@ struct WritingEditor: NSViewRepresentable {
     let textColor: NSColor
     let isDark: Bool
     var highlights: [EditorHighlight] = []
+    /// Offers "Dismiss Note" when right-clicking a highlight; receives its id.
+    var onDismissHighlight: ((String) -> Void)? = nil
     /// The editor takes focus again whenever this changes (e.g. the selected entry).
     var focusKey: AnyHashable? = nil
     /// False while something else (the ⌘K palette) owns the keyboard.
@@ -69,6 +71,7 @@ struct WritingEditor: NSViewRepresentable {
         coordinator.apply(EditorTheme(self))
         coordinator.load(text)
         coordinator.setHighlights(highlights)
+        coordinator.onDismissHighlight = onDismissHighlight
         coordinator.focusKey = focusKey
         coordinator.canTakeFocus = canTakeFocus
         textView.focusWhenAttached = canTakeFocus
@@ -82,6 +85,7 @@ struct WritingEditor: NSViewRepresentable {
             textView.textContainerInset = NSSize(width: 0, height: verticalInset)
         }
         coordinator.binding = $text
+        coordinator.onDismissHighlight = onDismissHighlight
         coordinator.setEditable(isEditable)
 
         let theme = EditorTheme(self)
@@ -120,6 +124,7 @@ struct WritingEditor: NSViewRepresentable {
         var lastText = ""
         var focusKey: AnyHashable?
         var canTakeFocus = true
+        var onDismissHighlight: ((String) -> Void)?
         /// Highlights as last passed in, and as currently drawn (moved along with edits).
         private(set) var sourceHighlights: [EditorHighlight] = []
         private var drawnHighlights: [EditorHighlight] = []
@@ -135,6 +140,9 @@ struct WritingEditor: NSViewRepresentable {
             textView.textStorage?.delegate = self
             textView.onHover = { [weak self] point in
                 self?.hover(at: point)
+            }
+            textView.highlightMenuItem = { [weak self] point in
+                self?.dismissMenuItem(at: point)
             }
             scrollView.contentView.postsBoundsChangedNotifications = true
             NotificationCenter.default.addObserver(
@@ -255,10 +263,16 @@ struct WritingEditor: NSViewRepresentable {
         // MARK: Hover
 
         private func hover(at point: NSPoint?) {
-            guard let point, let textView, !drawnHighlights.isEmpty else {
+            guard let point, let (highlight, rect) = highlight(at: point) else {
                 closePopover()
                 return
             }
+            showPopover(for: highlight, at: rect)
+        }
+
+        /// The highlight under `point` (text view coordinates) and the rect of its line segment there.
+        private func highlight(at point: NSPoint) -> (EditorHighlight, NSRect)? {
+            guard let textView, !drawnHighlights.isEmpty else { return nil }
             let index = textView.characterIndexForInsertion(at: point)
             // The insertion index rounds to the nearest boundary, so check both sides.
             let candidates = drawnHighlights.filter {
@@ -266,11 +280,24 @@ struct WritingEditor: NSViewRepresentable {
             }
             for highlight in candidates {
                 if let rect = segmentRect(of: highlight.range, containing: point) {
-                    showPopover(for: highlight, at: rect)
-                    return
+                    return (highlight, rect)
                 }
             }
+            return nil
+        }
+
+        private func dismissMenuItem(at point: NSPoint) -> NSMenuItem? {
+            guard onDismissHighlight != nil, let (highlight, _) = highlight(at: point) else { return nil }
+            let item = NSMenuItem(title: "Dismiss Note", action: #selector(dismissHighlight(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = highlight.id
+            return item
+        }
+
+        @objc private func dismissHighlight(_ sender: NSMenuItem) {
+            guard let id = sender.representedObject as? String else { return }
             closePopover()
+            onDismissHighlight?(id)
         }
 
         /// The on-screen rect (text view coordinates) of the line segment of `range` under `point`.
@@ -298,7 +325,10 @@ struct WritingEditor: NSViewRepresentable {
             popover.behavior = .applicationDefined
             popover.animates = false
             popover.appearance = theme?.appearance
-            let controller = NSHostingController(rootView: HighlightCommentView(comment: highlight.comment))
+            let controller = NSHostingController(rootView: HighlightCommentView(
+                comment: highlight.comment,
+                hint: onDismissHighlight == nil ? nil : "Right-click to dismiss"
+            ))
             controller.sizingOptions = .preferredContentSize
             popover.contentViewController = controller
             popover.show(relativeTo: rect, of: textView, preferredEdge: .minY)
@@ -343,6 +373,8 @@ struct EditorTheme: Equatable {
 
 final class WritingTextView: NSTextView {
     var onHover: ((NSPoint?) -> Void)?
+    /// An extra context-menu item for the point clicked (e.g. dismissing the highlight there).
+    var highlightMenuItem: ((NSPoint) -> NSMenuItem?)?
     /// Become first responder as soon as the view lands in a window.
     var focusWhenAttached = false
     private var hoverTrackingArea: NSTrackingArea?
@@ -381,17 +413,36 @@ final class WritingTextView: NSTextView {
         super.mouseExited(with: event)
         onHover?(nil)
     }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event)
+        guard let item = highlightMenuItem?(convert(event.locationInWindow, from: nil)) else { return menu }
+        let result = menu ?? NSMenu()
+        result.insertItem(item, at: 0)
+        if result.items.count > 1 {
+            result.insertItem(.separator(), at: 1)
+        }
+        return result
+    }
 }
 
 private struct HighlightCommentView: View {
     let comment: String
+    var hint: String? = nil
 
     var body: some View {
-        Text(comment)
-            .font(.system(size: 13))
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: 260, alignment: .leading)
-            .padding(12)
+        VStack(alignment: .leading, spacing: 6) {
+            Text(comment)
+                .font(.system(size: 13))
+                .fixedSize(horizontal: false, vertical: true)
+            if let hint {
+                Text(hint)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: 260, alignment: .leading)
+        .padding(12)
     }
 }
 

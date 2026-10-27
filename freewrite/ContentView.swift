@@ -162,6 +162,18 @@ struct ContentView: View {
     @State private var isHoveringStopVoiceNote = false
     @State private var isHoveringDiscardVoiceNote = false
     @State private var showingMicrophonePermissionPopover = false
+    // AI reviewers (Reviews.swift): notes on the selected entry, anchored to `annotationsBaseText`
+    // for the current version.
+    @ObservedObject private var reviews = ReviewService.shared
+    @AppStorage(ReviewerStore.key) private var reviewersJSON = ""
+    @State private var annotations: [Annotation] = []
+    @State private var annotationsEntryId: UUID? = nil
+    @State private var annotationsBaseText = ""
+    @State private var annotationSaveTask: Task<Void, Never>? = nil
+    /// Anchors moved by typing, not written yet (saved after a 1 s pause or by `flushAnnotationAnchors`).
+    @State private var pendingAnchors: PendingAnchors? = nil
+    @State private var showingReviewMenu = false
+    @State private var isHoveringReview = false
     let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     let entryHeight: CGFloat = 40
     
@@ -636,7 +648,7 @@ struct ContentView: View {
     private func isBottomBarItemAvailable(_ item: BottomBarItem) -> Bool {
         switch item {
         // Writing-only controls.
-        case .backspace, .versions, .recordVoiceNote: return currentVideoURL == nil
+        case .backspace, .versions, .recordVoiceNote, .review: return currentVideoURL == nil
         default: return true
         }
     }
@@ -660,6 +672,8 @@ struct ContentView: View {
             versionsButton(textColor: textColor, textHoverColor: textHoverColor)
         case .recordVoiceNote:
             voiceNoteButton(textColor: textColor, textHoverColor: textHoverColor)
+        case .review:
+            reviewButton(textColor: textColor, textHoverColor: textHoverColor)
         case .timer:
                 Button(timerButtonTitle) {
                     let now = Date()
@@ -992,6 +1006,8 @@ struct ContentView: View {
             createNewVersion()
         case .recordVoiceNote:
             toggleVoiceNoteRecording()
+        case .reviewEntry:
+            openReviewMenu()
         case .toggleHistory:
             withAnimation(.easeInOut(duration: 0.2)) {
                 showingSidebar.toggle()
@@ -1240,12 +1256,19 @@ struct ContentView: View {
             showStatus("Couldn't save this entry, so no new version was started.")
             return
         }
+        // Same for the notes on it: their positions must match the text being sealed.
+        flushAnnotationAnchors()
         do {
+            let sealedId = entryManifest?.current ?? versionStore.manifest(for: entry.filename).current
             let manifest = try versionStore.sealCurrent(entryFilename: entry.filename)
             applyManifest(manifest, toEntry: entry.id)
             placeholderText = placeholderOptions.randomElement() ?? "Begin writing"
             text = ""
             updatePreviewText(for: entry)
+            let automatic = reviewerProfiles.filter(\.autoRunOnNewVersion)
+            if !automatic.isEmpty {
+                runReviews(automatic, on: entry, versionId: sealedId)
+            }
         } catch {
             showStatus("Couldn't start a new version: \(error.localizedDescription)")
         }
@@ -1518,6 +1541,8 @@ struct ContentView: View {
                             ? NSColor(srgbRed: 0.20, green: 0.20, blue: 0.20, alpha: 1)
                             : NSColor(srgbRed: 0.9, green: 0.9, blue: 0.9, alpha: 1),
                         isDark: colorScheme == .dark,
+                        highlights: editorHighlights,
+                        onDismissHighlight: { dismissAnnotation(id: $0) },
                         focusKey: selectedEntryId,
                         canTakeFocus: !showingCommandPalette,
                         isEditable: viewedVersion == nil,
@@ -1625,6 +1650,10 @@ struct ContentView: View {
 
                         HStack(spacing: 8) {
                             bottomBarGroup(bottomBarLayout.right)
+                        }
+                        // Review with… when the Review item itself isn't in the bar.
+                        .popover(isPresented: reviewMenuBinding(onItem: false), attachmentAnchor: .point(UnitPoint(x: 0.9, y: 0)), arrowEdge: .top) {
+                            reviewMenu()
                         }
                         .padding(8)
                         .cornerRadius(6)
@@ -1879,9 +1908,16 @@ struct ContentView: View {
         }
         .onDisappear {
             WritingWindow.openCount -= 1
+            flushAnnotationAnchors()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            flushAnnotationAnchors()
         }
         .onChange(of: storage.rootURL) {
             // The entries folder changed in Settings; show what's in the new one.
+            // Reviews stay tied to the folder they started in, so they stop here.
+            reviews.stopReviews(outside: storage.rootURL)
+            flushAnnotationAnchors()
             currentVideoURL = nil
             resetVersionState(for: nil)
             loadExistingEntries()
@@ -1915,6 +1951,15 @@ struct ContentView: View {
                let currentEntry = entries.first(where: { $0.id == currentId }),
                currentEntry.entryType == .text {
                 saveEntry(entry: currentEntry)
+            }
+            followAnnotationEdits()
+        }
+        .onChange(of: annotationContext) {
+            reloadAnnotations()
+        }
+        .onReceive(reviews.annotationsChanged) { filename in
+            if filename == selectedTextEntry?.filename {
+                reloadAnnotations()
             }
         }
         .onReceive(timer) { _ in
@@ -1982,7 +2027,7 @@ struct ContentView: View {
     /// Fixed start of the left side for text entries: the current version's voice note and
     /// transient status (transcribing, errors).
     private var textEntryStatusVisible: Bool {
-        transcriptionStatus != nil || (viewedVersion == nil && entryManifest?.currentVersion.flatMap(audioURL(for:)) != nil)
+        transcriptionStatus != nil || runningReview != nil || (viewedVersion == nil && entryManifest?.currentVersion.flatMap(audioURL(for:)) != nil)
     }
 
     @ViewBuilder
@@ -1992,6 +2037,11 @@ struct ContentView: View {
         }
         if let transcriptionStatus {
             Text(transcriptionStatus)
+                .font(.system(size: 13))
+                .foregroundColor(textColor)
+                .lineLimit(1)
+        } else if let runningReview {
+            Text("\(runningReview.reviewerName) is reading \(runningReview.versionId)…")
                 .font(.system(size: 13))
                 .foregroundColor(textColor)
                 .lineLimit(1)
@@ -2598,6 +2648,8 @@ struct ContentView: View {
         // Delete the file from the filesystem
         let documentsDirectory = getDocumentsDirectory()
         let fileURL = documentsDirectory.appendingPathComponent(entry.filename)
+        // A review still running would write notes and a summary for an entry that's gone.
+        reviews.stopReviews(of: entry.filename, in: documentsDirectory)
 
         do {
             try fileManager.removeItem(at: fileURL)
@@ -2858,4 +2910,350 @@ private struct LevelMeter: View {
         .frame(height: 14)
         .animation(.linear(duration: 0.08), value: levels)
     }
+}
+
+// MARK: - Reviews
+
+extension ContentView {
+    private var reviewerProfiles: [ReviewerProfile] { ReviewerStore.decode(reviewersJSON) }
+
+    private var annotationStore: AnnotationStore { AnnotationStore(versionStore: versionStore) }
+
+    /// The review running on the selected entry, if any.
+    private var runningReview: ReviewActivity? {
+        selectedTextEntry.flatMap { reviews.activeRuns[$0.filename] }
+    }
+
+    /// Changes when another entry, version or folder is on screen: annotations are reloaded then.
+    private var annotationContext: String {
+        [selectedTextEntry?.filename ?? "", entryManifest?.current ?? "", storage.rootURL.path].joined(separator: "|")
+    }
+
+    /// Active notes of the version on screen, coloured per reviewer.
+    private var editorHighlights: [EditorHighlight] {
+        guard let version = displayedVersion, annotationsEntryId == selectedEntryId, !annotations.isEmpty else { return [] }
+        let profiles = Dictionary(reviewerProfiles.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return annotations
+            .filter { $0.versionId == version.id && $0.status == .active }
+            .map { annotation in
+                let profile = profiles[annotation.reviewerId]
+                return EditorHighlight(
+                    id: annotation.id,
+                    range: annotation.anchor.range,
+                    color: (profile?.color ?? .yellow).highlightColor,
+                    comment: "\(profile?.name ?? annotation.reviewerId.capitalized) — \(annotation.comment)"
+                )
+            }
+    }
+
+    /// Reads `annotations.json` for the selected entry and re-anchors the current version's notes
+    /// to the text in the editor (saving any offsets or statuses that changed).
+    private func reloadAnnotations() {
+        // Anchors moved by the last edits belong to the text they were typed in; save them first.
+        flushAnnotationAnchors()
+        guard let entry = selectedTextEntry else {
+            annotations = []
+            annotationsEntryId = nil
+            return
+        }
+        var loaded: [Annotation]
+        do {
+            loaded = try annotationStore.load(for: entry.filename)
+        } catch {
+            print("Reviews: unreadable annotations for \(entry.filename): \(error)")
+            loaded = []
+        }
+        if let current = entryManifest?.current {
+            let anchored = AnnotationAnchoring.reanchor(loaded, versionId: current, in: text)
+            if anchored != loaded {
+                persistAnchors(anchored, entryFilename: entry.filename)
+            }
+            loaded = anchored
+        }
+        annotations = loaded
+        annotationsEntryId = entry.id
+        annotationsBaseText = text
+    }
+
+    /// Moves the current version's notes along with typing (and orphans those whose quote is gone).
+    private func followAnnotationEdits() {
+        guard viewedVersion == nil, let entry = selectedTextEntry, annotationsEntryId == entry.id,
+              let current = entryManifest?.current else { return }
+        let old = annotationsBaseText
+        annotationsBaseText = text
+        guard annotations.contains(where: { $0.versionId == current && $0.status != .dismissed }) else { return }
+        let moved = AnnotationAnchoring.followEdit(annotations, versionId: current, from: old, to: text)
+        guard moved != annotations else { return }
+        annotations = moved
+        pendingAnchors = PendingAnchors(annotations: moved, entryFilename: entry.filename, store: annotationStore)
+        annotationSaveTask?.cancel()
+        annotationSaveTask = Task {
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            flushAnnotationAnchors()
+        }
+    }
+
+    /// Writes the anchors typing moved, now, into the folder and entry they were typed in.
+    /// Runs before anything that reloads the notes or seals the text (switching entry, version
+    /// or folder, New Version, closing the window, quitting).
+    private func flushAnnotationAnchors() {
+        annotationSaveTask?.cancel()
+        annotationSaveTask = nil
+        guard let pending = pendingAnchors else { return }
+        pendingAnchors = nil
+        persistAnchors(pending.annotations, entryFilename: pending.entryFilename, in: pending.store)
+    }
+
+    /// Writes anchors/statuses into the file, merging by id so notes a running review added meanwhile stay.
+    private func persistAnchors(_ updated: [Annotation], entryFilename: String, in store: AnnotationStore? = nil) {
+        let byId = Dictionary(updated.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        do {
+            try (store ?? annotationStore).update(for: entryFilename) { stored in
+                for index in stored.indices {
+                    guard stored[index].status != .dismissed, let mine = byId[stored[index].id] else { continue }
+                    stored[index].anchor = mine.anchor
+                    stored[index].status = mine.status
+                }
+            }
+        } catch {
+            print("Reviews: couldn't save annotation anchors: \(error)")
+        }
+    }
+
+    private func dismissAnnotation(id: String) {
+        guard let entry = selectedTextEntry else { return }
+        do {
+            try annotationStore.update(for: entry.filename) { stored in
+                if let index = stored.firstIndex(where: { $0.id == id }) {
+                    stored[index].status = .dismissed
+                }
+            }
+            if let index = annotations.firstIndex(where: { $0.id == id }) {
+                annotations[index].status = .dismissed
+            }
+        } catch {
+            showStatus("Couldn't dismiss the note: \(error.localizedDescription)")
+        }
+    }
+
+    /// Removes every note on the version on screen.
+    private func clearReview() {
+        guard let entry = selectedTextEntry, let version = displayedVersion else { return }
+        do {
+            try annotationStore.update(for: entry.filename) { stored in
+                stored.removeAll { $0.versionId == version.id }
+            }
+            annotations.removeAll { $0.versionId == version.id }
+        } catch {
+            showStatus("Couldn't clear the review: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: Running
+
+    private func openReviewMenu() {
+        guard selectedTextEntry != nil, !voiceRecorder.isRecording, !showingVideoRecording else {
+            NSSound.beep()
+            return
+        }
+        withAnimation(.easeOut(duration: 0.2)) {
+            bottomNavOpacity = 1.0
+        }
+        showingReviewMenu.toggle()
+    }
+
+    private var isReviewItemInBar: Bool {
+        (bottomBarLayout.left + bottomBarLayout.right).contains(.review) && isBottomBarItemAvailable(.review)
+    }
+
+    /// The menu hangs off the Review item when it's in the bar, else off the right side of the bar.
+    private func reviewMenuBinding(onItem: Bool) -> Binding<Bool> {
+        Binding(
+            get: { showingReviewMenu && isReviewItemInBar == onItem },
+            set: { showingReviewMenu = $0 }
+        )
+    }
+
+    /// Reviews the version on screen with `profile`.
+    private func startReview(_ profile: ReviewerProfile) {
+        showingReviewMenu = false
+        guard let entry = selectedTextEntry, let version = displayedVersion else { return }
+        if version.id == entryManifest?.current {
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                showStatus("Write something first, then ask for a review.")
+                return
+            }
+            // Reviewers read the file; make sure it's what's on screen.
+            guard saveEntry(entry: entry) else {
+                showStatus("Couldn't save this entry, so it wasn't reviewed.")
+                return
+            }
+        }
+        runReviews([profile], on: entry, versionId: version.id)
+    }
+
+    /// Runs reviewers one after another (one review per entry at a time).
+    private func runReviews(_ profiles: [ReviewerProfile], on entry: HumanEntry, versionId: String) {
+        Task {
+            for profile in profiles {
+                do {
+                    let outcome = try await reviews.review(entryFilename: entry.filename, entryId: entry.id, versionId: versionId, profile: profile)
+                    let notes = outcome.added == 1 ? "1 note" : "\(outcome.added) notes"
+                    showStatus(outcome.added == 0 ? "\(profile.name) had nothing to add." : "\(profile.name) left \(notes) on \(versionId).", for: entry.id)
+                } catch ReviewError.stopped(let reason) {
+                    // The rest of the queue would run on an entry that's gone or in another folder.
+                    if reason == .folderChanged {
+                        showStatus("\(profile.name): \(ReviewError.stopped(reason).localizedDescription)")
+                    }
+                    return
+                } catch {
+                    showStatus("\(profile.name): \(error.localizedDescription)", for: entry.id)
+                }
+            }
+        }
+    }
+
+    // MARK: Views
+
+    private func reviewButton(textColor: Color, textHoverColor: Color) -> some View {
+        Button(action: openReviewMenu) {
+            Group {
+                if runningReview != nil {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(isHoveringReview ? textHoverColor : textColor)
+                } else {
+                    Image(systemName: "sparkles")
+                        .foregroundColor(isHoveringReview ? textHoverColor : textColor)
+                }
+            }
+            .frame(width: 14, height: 14)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(runningReview == nil ? "Review with" : "Review running")
+        .accessibilityIdentifier("reviewButton")
+        .help("Review with…")
+        .onHover { hovering in
+            isHoveringReview = hovering
+            hoverCursor(hovering)
+        }
+        .popover(isPresented: reviewMenuBinding(onItem: true), attachmentAnchor: .point(UnitPoint(x: 0.5, y: 0)), arrowEdge: .top) {
+            reviewMenu()
+        }
+    }
+
+    private func reviewMenu() -> some View {
+        let version = displayedVersion
+        let versionNotes = annotations.filter { $0.versionId == version?.id && $0.status != .dismissed }
+        let summary = selectedTextEntry.flatMap { entry in
+            version.flatMap { annotationStore.latestSummary(versionId: $0.id, entryFilename: entry.filename) }
+        }
+        let configured = reviews.credentialStates.values.contains(where: \.isConfigured)
+        return VStack(alignment: .leading, spacing: 0) {
+            Text("Review \(version?.id ?? "v1") with")
+                .font(.system(size: 11, weight: .medium))
+                .opacity(0.6)
+                .padding(.horizontal, 12)
+                .padding(.top, 9)
+                .padding(.bottom, 2)
+            Text("Sends this entry's text to the reviewer's provider.")
+                .font(.system(size: 10))
+                .opacity(0.5)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 4)
+            ForEach(reviewerProfiles) { profile in
+                reviewMenuRow {
+                    startReview(profile)
+                } label: {
+                    Circle()
+                        .fill(Color(nsColor: profile.color.nsColor))
+                        .frame(width: 8, height: 8)
+                    Text(profile.name)
+                        .font(.system(size: 13))
+                    Spacer(minLength: 12)
+                }
+                .disabled(runningReview != nil)
+                .accessibilityIdentifier("reviewWith-\(profile.id)")
+            }
+            if let runningReview {
+                Text("\(runningReview.reviewerName) is reading \(runningReview.versionId)…")
+                    .font(.system(size: 12))
+                    .opacity(0.6)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+            } else if !configured && !reviews.credentialStates.isEmpty {
+                Text("Add a Claude key or sign in to ChatGPT first.")
+                    .font(.system(size: 12))
+                    .opacity(0.6)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+            }
+            if let summary {
+                Divider()
+                Text(summary)
+                    .font(.system(size: 12))
+                    .opacity(0.8)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+            }
+            Divider()
+            if !versionNotes.isEmpty {
+                reviewMenuRow {
+                    showingReviewMenu = false
+                    clearReview()
+                } label: {
+                    Text("Clear Review (\(versionNotes.count == 1 ? "1 note" : "\(versionNotes.count) notes"))")
+                        .font(.system(size: 13))
+                    Spacer(minLength: 12)
+                }
+                .accessibilityIdentifier("clearReviewButton")
+                Divider()
+            }
+            reviewMenuRow {
+                showingReviewMenu = false
+                UserDefaults.standard.set("agents", forKey: "settingsPane")
+                if SettingsWindow.window == nil {
+                    SettingsWindow.toggle(openSettings)
+                }
+            } label: {
+                Text("Reviewers & Models…")
+                    .font(.system(size: 13))
+                Spacer(minLength: 12)
+            }
+        }
+        .frame(width: 260)
+        .background(popoverBackgroundColor)
+        .foregroundColor(popoverTextColor)
+        .task { await reviews.refreshCredentials() }
+    }
+
+    private func reviewMenuRow<Label: View>(action: @escaping () -> Void, @ViewBuilder label: () -> Label) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                label()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            if hovering {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+    }
+}
+
+/// Annotation anchors moved by typing and not saved yet, with the folder and entry they belong to.
+struct PendingAnchors {
+    let annotations: [Annotation]
+    let entryFilename: String
+    let store: AnnotationStore
 }
