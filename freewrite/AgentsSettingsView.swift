@@ -97,7 +97,7 @@ struct AgentsSettingsView: View {
             Text(ReviewProvider.anthropic.title)
             HStack(spacing: 6) {
                 providerStatus(.anthropic)
-                Link("Get an API key", destination: URL(string: "https://console.anthropic.com/settings/keys")!)
+                Link("Get an API key", destination: URL(string: "https://platform.claude.com/settings/keys")!)
             }
         } control: {
             if case .apiKey = reviews.credentialStates[.anthropic] {
