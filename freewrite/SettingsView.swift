@@ -2,7 +2,8 @@
 //  SettingsView.swift
 //  freewrite
 //
-//  Settings window (⌘,): writing font/size, appearance, session length and keyboard shortcuts.
+//  Settings window (⌘,): stored settings keys, app commands + shortcuts, the sidebar and the
+//  General and Shortcuts panes. The other panes live in SettingsPanes.swift and BottomBar.swift.
 //
 
 import SwiftUI
@@ -49,6 +50,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
     case toggleTheme
     case increaseFontSize
     case decreaseFontSize
+    case showWelcomeEntry
 
     var id: String { rawValue }
 
@@ -65,6 +67,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .toggleTheme: return "Toggle Light/Dark"
         case .increaseFontSize: return "Bigger Text"
         case .decreaseFontSize: return "Smaller Text"
+        case .showWelcomeEntry: return "Show Welcome Entry"
         }
     }
 
@@ -81,6 +84,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .toggleTheme: return KeyShortcut(key: "l", modifiers: [.command, .shift])
         case .increaseFontSize: return KeyShortcut(key: "=", modifiers: [.command])
         case .decreaseFontSize: return KeyShortcut(key: "-", modifiers: [.command])
+        case .showWelcomeEntry: return nil
         }
     }
 
@@ -265,6 +269,9 @@ struct FreewriteCommands: Commands {
             button(for: .toggleHistory)
             button(for: .toggleTheme)
         }
+        CommandGroup(after: .help) {
+            button(for: .showWelcomeEntry)
+        }
     }
 
     @ViewBuilder
@@ -289,70 +296,165 @@ struct FreewriteCommands: Commands {
 
 // MARK: - Settings window
 
-private enum SettingsPane: String, CaseIterable, Identifiable {
-    case writing
-    case transcription
+/// One page of the Settings window. Adding a page = a case here (title, icon, tint, group)
+/// plus its view in `SettingsView.pane(_:)`.
+enum SettingsPane: String, CaseIterable, Identifiable {
+    case general
+    case recording
     case storage
+    case permissions
     case bottomBar
     case shortcuts
+    case about
+
+    /// Sidebar sections, top to bottom.
+    enum Group: CaseIterable {
+        case top
+        case settings
+        case app
+
+        var header: String? {
+            switch self {
+            case .top: return nil
+            case .settings: return "Settings"
+            case .app: return "Freewrite"
+            }
+        }
+    }
 
     var id: String { rawValue }
 
+    var group: Group {
+        switch self {
+        case .general: return .top
+        case .about: return .app
+        default: return .settings
+        }
+    }
+
     var title: String {
         switch self {
-        case .writing: return "Writing"
-        case .transcription: return "Transcription"
+        case .general: return "General"
+        case .recording: return "Recording"
         case .storage: return "Storage"
+        case .permissions: return "Permissions"
         case .bottomBar: return "Bottom Bar"
         case .shortcuts: return "Shortcuts"
+        case .about: return "About"
         }
     }
 
     var systemImage: String {
         switch self {
-        case .writing: return "textformat"
-        case .transcription: return "waveform"
-        case .storage: return "folder"
+        case .general: return "gearshape.fill"
+        case .recording: return "record.circle"
+        case .storage: return "internaldrive.fill"
+        case .permissions: return "hand.raised.fill"
         case .bottomBar: return "dock.rectangle"
-        case .shortcuts: return "keyboard"
+        case .shortcuts: return "command"
+        case .about: return "info"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .general: return .gray
+        case .recording: return .red
+        case .storage: return .blue
+        case .permissions: return .green
+        case .bottomBar: return .indigo
+        case .shortcuts: return .orange
+        case .about: return .gray
         }
     }
 }
 
+/// A white SF Symbol on a coloured rounded square, like System Settings.
+struct SettingsIconTile: View {
+    let systemImage: String
+    let tint: Color
+    var size: CGFloat = 20
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
+            .fill(tint.gradient)
+            .frame(width: size, height: size)
+            .overlay {
+                Image(systemName: systemImage)
+                    .font(.system(size: size * 0.55, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .accessibilityHidden(true)
+    }
+}
+
 struct SettingsView: View {
-    @AppStorage("settingsPane") private var selectedPane: SettingsPane = .writing
+    @AppStorage("settingsPane") private var selectedPane: SettingsPane = .general
 
     var body: some View {
         NavigationSplitView {
-            List(SettingsPane.allCases, selection: Binding(
+            List(selection: Binding(
                 get: { Optional(selectedPane) },
                 set: { if let pane = $0 { selectedPane = pane } }
-            )) { pane in
-                Label(pane.title, systemImage: pane.systemImage)
-                    .tag(pane)
+            )) {
+                ForEach(SettingsPane.Group.allCases, id: \.self) { group in
+                    let panes = SettingsPane.allCases.filter { $0.group == group }
+                    if let header = group.header {
+                        Section(header) { rows(panes) }
+                    } else {
+                        Section { rows(panes) }
+                    }
+                }
             }
-            .navigationSplitViewColumnWidth(180)
+            .navigationSplitViewColumnWidth(190)
             .toolbar(removing: .sidebarToggle)
         } detail: {
             pane(selectedPane)
                 .navigationTitle(selectedPane.title)
+                .toolbar(removing: .title)
+                .toolbar {
+                    ToolbarItem(placement: .navigation) {
+                        HStack(spacing: 8) {
+                            SettingsIconTile(systemImage: selectedPane.systemImage, tint: selectedPane.tint, size: 22)
+                            Text(selectedPane.title)
+                                .font(.title3.weight(.semibold))
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityAddTraits(.isHeader)
+                    }
+                    .sharedBackgroundVisibility(.hidden)
+                }
         }
-        .frame(width: 720, height: 520)
+        .frame(width: 720, height: 540)
+    }
+
+    private func rows(_ panes: [SettingsPane]) -> some View {
+        ForEach(panes) { pane in
+            Label {
+                Text(pane.title)
+            } icon: {
+                SettingsIconTile(systemImage: pane.systemImage, tint: pane.tint)
+            }
+            .tag(pane)
+            .accessibilityIdentifier("settingsPane-\(pane.rawValue)")
+        }
     }
 
     @ViewBuilder
     private func pane(_ pane: SettingsPane) -> some View {
         switch pane {
-        case .writing: WritingSettingsView()
-        case .transcription: TranscriptionSettingsView()
+        case .general: GeneralSettingsView()
+        case .recording: RecordingSettingsView()
         case .storage: StorageSettingsView()
+        case .permissions: PermissionsSettingsView()
         case .bottomBar: BottomBarSettingsView()
         case .shortcuts: ShortcutSettingsView()
+        case .about: AboutSettingsView()
         }
     }
 }
 
-private struct WritingSettingsView: View {
+private struct GeneralSettingsView: View {
     @AppStorage(SettingsKey.fontName) private var fontName = WritingFont.defaultName
     @AppStorage(SettingsKey.fontSize) private var fontSize = WritingFont.defaultSize
     @AppStorage(SettingsKey.colorScheme) private var colorScheme = "light"
@@ -363,29 +465,17 @@ private struct WritingSettingsView: View {
     var body: some View {
         Form {
             Section("Text") {
-                LabeledContent("Font") {
-                    HStack {
-                        Picker("Font", selection: $fontName) {
-                            ForEach(WritingFont.presets, id: \.name) { preset in
-                                Text(preset.label).tag(preset.name)
-                            }
-                            Divider()
-                            ForEach(allFamilies, id: \.self) { family in
-                                Text(family).tag(family)
-                            }
-                            // Keep a previously chosen font selectable even if it's no longer installed.
-                            if !allFamilies.contains(fontName) && !WritingFont.presets.contains(where: { $0.name == fontName }) {
-                                Text(fontName).tag(fontName)
-                            }
-                        }
-                        .labelsHidden()
-                        .fixedSize()
-
-                        Button("Random") {
-                            if let random = allFamilies.randomElement() {
-                                fontName = random
-                            }
-                        }
+                Picker("Font", selection: $fontName) {
+                    ForEach(WritingFont.presets, id: \.name) { preset in
+                        Text(preset.label).tag(preset.name)
+                    }
+                    Divider()
+                    ForEach(allFamilies, id: \.self) { family in
+                        Text(family).tag(family)
+                    }
+                    // Keep a previously chosen font selectable even if it's no longer installed.
+                    if !allFamilies.contains(fontName) && !WritingFont.presets.contains(where: { $0.name == fontName }) {
+                        Text(fontName).tag(fontName)
                     }
                 }
 
@@ -400,6 +490,20 @@ private struct WritingSettingsView: View {
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 4)
+
+                HStack {
+                    Spacer()
+                    Button("Random Font") {
+                        if let random = allFamilies.randomElement() {
+                            fontName = random
+                        }
+                    }
+                    Button("Reset to Default") {
+                        fontName = WritingFont.defaultName
+                        fontSize = WritingFont.defaultSize
+                    }
+                    .disabled(fontName == WritingFont.defaultName && fontSize == WritingFont.defaultSize)
+                }
             }
 
             Section("Appearance") {
@@ -410,146 +514,31 @@ private struct WritingSettingsView: View {
                 .pickerStyle(.segmented)
             }
 
-            Section("Session") {
+            Section {
                 Stepper(value: $sessionMinutes, in: 5...45, step: 5) {
                     Text("Timer length: \(sessionMinutes) min")
                 }
+            } header: {
+                Text("Session")
+            } footer: {
+                SettingsFootnote("Scroll over the timer in the bottom bar to adjust it while you write.")
             }
         }
         .formStyle(.grouped)
     }
 }
 
-private struct TranscriptionSettingsView: View {
-    @AppStorage(SettingsKey.transcriptionEngine) private var engine = TranscriptionEngine.apple.rawValue
-    @AppStorage(SettingsKey.hexModel) private var hexModel = ""
-    @AppStorage(SettingsKey.hexLanguage) private var hexLanguage = "en"
+/// Small grey text under a Form section.
+struct SettingsFootnote: View {
+    private let text: String
 
-    private enum HexStatus: Equatable {
-        case checking
-        case connected(version: String, models: [HexClient.Model])
-        case unavailable(String)
-    }
-
-    @State private var hexStatus: HexStatus = .checking
+    init(_ text: String) { self.text = text }
 
     var body: some View {
-        Form {
-            Section {
-                Picker("Engine", selection: $engine) {
-                    ForEach(TranscriptionEngine.allCases) { engine in
-                        Text(engine.title).tag(engine.rawValue)
-                    }
-                }
-                .pickerStyle(.radioGroup)
-            } footer: {
-                Text(engine == TranscriptionEngine.hex.rawValue
-                     ? "Video entries are transcribed by Hex after you stop recording. If Hex isn't running, Apple's on-device transcript is kept when available."
-                     : "Video entries are transcribed live on this Mac with Apple's speech recognition.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            if engine == TranscriptionEngine.hex.rawValue {
-                Section("Hex") {
-                    LabeledContent("Status") {
-                        HStack {
-                            switch hexStatus {
-                            case .checking:
-                                ProgressView().controlSize(.small)
-                            case .connected(let version, _):
-                                Label("Connected · \(version)", systemImage: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
-                                    .fixedSize()
-                            case .unavailable(let reason):
-                                Label(reason, systemImage: "exclamationmark.triangle.fill")
-                                    .foregroundStyle(.orange)
-                                    .lineLimit(2)
-                            }
-                            Button("Refresh") { Task { await refreshHex() } }
-                        }
-                    }
-
-                    Picker("Model", selection: $hexModel) {
-                        Text("Automatic").tag("")
-                        ForEach(usableModels) { model in
-                            Text(model.displayName).tag(model.id)
-                        }
-                        if !hexModel.isEmpty && !usableModels.contains(where: { $0.id == hexModel }) {
-                            Text(hexModel).tag(hexModel)
-                        }
-                    }
-
-                    TextField("Language", text: $hexLanguage, prompt: Text("en"))
-
-                    if case .unavailable = hexStatus {
-                        Link("Get Hex", destination: URL(string: "https://hex.kitlangton.com")!)
-                    }
-                }
-                .task { await refreshHex() }
-            }
-        }
-        .formStyle(.grouped)
-    }
-
-    private var usableModels: [HexClient.Model] {
-        if case .connected(_, let models) = hexStatus {
-            return models.filter(\.usable)
-        }
-        return []
-    }
-
-    private func refreshHex() async {
-        hexStatus = .checking
-        do {
-            let client = try await HexClient.connect()
-            hexStatus = .connected(version: try await client.health(), models: try await client.models())
-        } catch {
-            hexStatus = .unavailable(error.localizedDescription)
-        }
-    }
-}
-
-private struct StorageSettingsView: View {
-    private let storage = EntryStorage.shared
-
-    var body: some View {
-        Form {
-            Section {
-                LabeledContent("Entries Folder") {
-                    Text(storage.rootURL.path)
-                        .lineLimit(3)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                        .multilineTextAlignment(.trailing)
-                        .accessibilityIdentifier("storageFolderPath")
-                }
-
-                HStack {
-                    if storage.isTransferring {
-                        ProgressView().controlSize(.small)
-                        Text("Transferring entries…")
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Show in Finder") {
-                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: storage.rootURL.path)
-                    }
-                    Button("Use Default") { Task { await storage.useDefaultFolder() } }
-                        .disabled(storage.isUsingDefault)
-                    Button("Choose Folder…") { Task { await storage.chooseFolder() } }
-                        .accessibilityIdentifier("chooseStorageFolderButton")
-                }
-                .disabled(storage.isTransferring)
-            } footer: {
-                Text(storage.isUsingDefault
-                     ? "Entries are plain Markdown files and videos. The default folder is inside Freewrite's app container; choose a folder such as Documents or iCloud Drive to keep them where you can find them."
-                     : "Entries are plain Markdown files and videos in this folder. Use Default switches back to the folder inside Freewrite's app container.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

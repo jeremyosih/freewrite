@@ -34,7 +34,7 @@ final class CameraManager: NSObject, ObservableObject, @unchecked Sendable {
     private var hasNotifiedReady = false
     private var hasNotifiedCannotRecord = false
     private var shouldRunLiveCaptions = false
-    private var speechRecognizer = SFSpeechRecognizer(locale: Locale.current)
+    private var speechRecognizer: SFSpeechRecognizer?
     private var speechRecognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var speechRecognitionTask: SFSpeechRecognitionTask?
     private var captionPauseCommitWorkItem: DispatchWorkItem?
@@ -192,7 +192,7 @@ final class CameraManager: NSObject, ObservableObject, @unchecked Sendable {
             defer { self.isSettingUpSession = false }
 
             guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front),
-                  let audioDevice = AVCaptureDevice.default(for: .audio) else {
+                  let audioDevice = AudioInputDevices.captureDevice() else {
                 print("Failed to get camera/audio device")
                 DispatchQueue.main.async {
                     self.notifyCannotRecordIfNeeded()
@@ -383,12 +383,16 @@ final class CameraManager: NSObject, ObservableObject, @unchecked Sendable {
 
     private func startLiveCaptionRecognitionIfNeeded() {
         guard speechRecognitionTask == nil else { return }
-        guard let speechRecognizer = speechRecognizer, speechRecognizer.isAvailable else { return }
+        // Re-created each time so a language change in Settings › Recording applies to the next recording.
+        speechRecognizer = SFSpeechRecognizer(locale: AppleSpeechLanguage.locale)
+        // Journal audio never goes to Apple's servers: without a local model there's no live transcript
+        // (Hex can still transcribe the saved video).
+        guard let speechRecognizer = speechRecognizer, speechRecognizer.isAvailable,
+              speechRecognizer.supportsOnDeviceRecognition else { return }
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
-        // Keep journal audio on this Mac whenever the recognizer can run locally.
-        request.requiresOnDeviceRecognition = speechRecognizer.supportsOnDeviceRecognition
+        request.requiresOnDeviceRecognition = true
         speechRecognitionRequest = request
 
         speechRecognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
