@@ -163,6 +163,8 @@ private struct InputLevelMeter: View {
     @State private var level: Float = 0
     @State private var status = AVCaptureDevice.authorizationStatus(for: .audio)
     @State private var failed = false
+    /// Bumped to restart capture (device connected/disconnected, engine stopped).
+    @State private var restartToken = 0
 
     var body: some View {
         Group {
@@ -185,10 +187,12 @@ private struct InputLevelMeter: View {
                 .accessibilityValue("\(Int(level * 100)) percent")
             }
         }
-        .task(id: "\(microphoneID)|\(status.rawValue)") { await meter() }
+        .task(id: "\(microphoneID)|\(status.rawValue)|\(restartToken)") { await meter() }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             status = AVCaptureDevice.authorizationStatus(for: .audio)
         }
+        .onReceive(NotificationCenter.default.publisher(for: AVCaptureDevice.wasConnectedNotification)) { _ in restartToken += 1 }
+        .onReceive(NotificationCenter.default.publisher(for: AVCaptureDevice.wasDisconnectedNotification)) { _ in restartToken += 1 }
     }
 
     /// Runs until the view goes away or the microphone changes (the task is cancelled).
@@ -207,6 +211,13 @@ private struct InputLevelMeter: View {
         }
         defer { capture.stop() }
         while !Task.isCancelled {
+            guard capture.isRunning else {
+                // The engine stops when its device goes away; start over on whatever is current.
+                level = 0
+                try? await Task.sleep(for: .seconds(1))
+                if !Task.isCancelled { restartToken += 1 }
+                return
+            }
             // Fall quickly but not instantly, so the meter doesn't flicker.
             level = max(capture.level, level * 0.8)
             try? await Task.sleep(for: .milliseconds(60))
@@ -270,7 +281,12 @@ struct StorageSettingsView: View {
         .formStyle(.grouped)
         .task(id: "\(storage.rootURL.path)|\(storage.isTransferring)") {
             let root = storage.rootURL
-            folderSize = await Task.detached(priority: .utility) { Self.size(of: root) }.value
+            folderSize = nil
+            let scan = Task.detached(priority: .utility) { Self.size(of: root) }
+            let size = await withTaskCancellationHandler { await scan.value } onCancel: { scan.cancel() }
+            // A scan of a folder that's no longer current must not overwrite the new size.
+            guard !Task.isCancelled, storage.rootURL == root else { return }
+            folderSize = size
         }
     }
 
@@ -280,6 +296,7 @@ struct StorageSettingsView: View {
         guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys) else { return 0 }
         var total: Int64 = 0
         for case let url as URL in enumerator {
+            if Task.isCancelled { break }
             guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true else { continue }
             total += Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0)
         }

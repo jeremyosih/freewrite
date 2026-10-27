@@ -269,6 +269,9 @@ struct FreewriteCommands: Commands {
             button(for: .toggleHistory)
             button(for: .toggleTheme)
         }
+        CommandGroup(after: .help) {
+            button(for: .showWelcomeEntry)
+        }
     }
 
     @ViewBuilder

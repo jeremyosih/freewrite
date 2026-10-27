@@ -79,8 +79,9 @@ final class VoiceNoteRecorder: NSObject, AVAudioRecorderDelegate {
         if let capture, let url = captureURL {
             let duration = capture.recordedDuration
             finish()
-            let ok = capture.stop()
-            return Self.keep(url, if: ok && duration > 0.3)
+            capture.stop()
+            // Audio written before a write failure is still a valid file; keep it.
+            return Self.keep(url, if: duration > 0.3)
         }
         guard let recorder else { return nil }
         let url = recorder.url
@@ -152,7 +153,12 @@ final class VoiceNoteRecorder: NSObject, AVAudioRecorderDelegate {
         if let capture {
             guard capture.isRunning else {
                 // The engine stops when its device goes away or the configuration changes.
-                handleCaptureStop()
+                handleCaptureStop(reason: "Recording stopped: the microphone changed or was disconnected.")
+                return
+            }
+            guard !capture.hasWriteFailed else {
+                // Stop right away instead of recording into a file that no longer accepts audio.
+                handleCaptureStop(reason: "Recording stopped: the audio couldn't be saved.")
                 return
             }
             elapsed = capture.recordedDuration
@@ -170,13 +176,12 @@ final class VoiceNoteRecorder: NSObject, AVAudioRecorderDelegate {
         levels.append(level)
     }
 
-    private func handleCaptureStop() {
+    private func handleCaptureStop(reason: String) {
         guard let capture, let url = captureURL else { return }
-        let captured = elapsed > 0.3
+        let captured = capture.recordedDuration > 0.3
         finish()
-        let ok = capture.stop()
-        let kept = Self.keep(url, if: captured && ok)
-        onUnexpectedStop?(kept, "Recording stopped: the microphone changed or was disconnected.")
+        capture.stop()
+        onUnexpectedStop?(Self.keep(url, if: captured), reason)
     }
 }
 

@@ -385,12 +385,14 @@ final class CameraManager: NSObject, ObservableObject, @unchecked Sendable {
         guard speechRecognitionTask == nil else { return }
         // Re-created each time so a language change in Settings › Recording applies to the next recording.
         speechRecognizer = SFSpeechRecognizer(locale: AppleSpeechLanguage.locale)
-        guard let speechRecognizer = speechRecognizer, speechRecognizer.isAvailable else { return }
+        // Journal audio never goes to Apple's servers: without a local model there's no live transcript
+        // (Hex can still transcribe the saved video).
+        guard let speechRecognizer = speechRecognizer, speechRecognizer.isAvailable,
+              speechRecognizer.supportsOnDeviceRecognition else { return }
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
-        // Keep journal audio on this Mac whenever the recognizer can run locally.
-        request.requiresOnDeviceRecognition = speechRecognizer.supportsOnDeviceRecognition
+        request.requiresOnDeviceRecognition = true
         speechRecognitionRequest = request
 
         speechRecognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in

@@ -55,7 +55,8 @@ Choose another one in **Settings › Storage**.
 ## Privacy
 
 Freewrite has no account, no server and no analytics. Entries, recordings and transcripts stay on
-your Mac. Transcription runs on-device with Apple's speech recognition or through Hex's local API.
+your Mac. Transcription runs on-device with Apple's speech recognition (never Apple's servers: if your language
+has no on-device model, Apple transcription is skipped) or through Hex's local API.
 The camera, microphone and speech recognition are only requested when you first use a feature
 that needs them; **Settings › Permissions** shows what's allowed.
 

@@ -135,7 +135,8 @@ final class AudioInputCapture: @unchecked Sendable {
         }
     }
 
-    /// Stops capture and closes the file. Returns false if writing failed along the way.
+    /// Stops capture and closes the file. Returns false if writing failed along the way
+    /// (everything written before the failure is still playable).
     @discardableResult
     func stop() -> Bool {
         engine.inputNode.removeTap(onBus: 0)
@@ -149,6 +150,9 @@ final class AudioInputCapture: @unchecked Sendable {
     }
 
     var isRunning: Bool { engine.isRunning }
+
+    /// True once writing to the file failed; audio written before that is still in the file.
+    var hasWriteFailed: Bool { lock.withLock { writeFailed } }
 
     /// Input level (0…1, -50 dB and below reads as silence).
     var level: Float { lock.withLock { latestLevel } }
