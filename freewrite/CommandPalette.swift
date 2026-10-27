@@ -2,16 +2,20 @@
 //  CommandPalette.swift
 //  freewrite
 //
-//  ⌘K palette: search every entry's full text (and video transcripts) plus app actions.
+//  ⌘K palette: search every entry's full text (video transcripts and sealed versions too)
+//  plus app actions.
 //
 
 import SwiftUI
 
 struct PaletteDocument: Identifiable, Equatable, Sendable {
+    /// The entry's id (shared by all of its versions).
     let id: UUID
     let date: String
     let isVideo: Bool
     let body: String
+    /// A sealed version ("v1"); nil for the entry's current text.
+    var version: String? = nil
 
     /// First non-empty line, used as the row title.
     var title: String {
@@ -29,7 +33,7 @@ enum PaletteItem: Identifiable {
 
     var id: String {
         switch self {
-        case .entry(let document, _): return "entry-\(document.id.uuidString)"
+        case .entry(let document, _): return "entry-\(document.id.uuidString)-\(document.version ?? "current")"
         case .command(let command): return "command-\(command.rawValue)"
         case .settings: return "settings"
         }
@@ -42,7 +46,8 @@ enum PaletteSearch {
     static func entries(_ documents: [PaletteDocument], query: String) -> [PaletteItem] {
         let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
         guard !terms.isEmpty else {
-            return documents.prefix(50).map { .entry($0, snippet: nil) }
+            // Sealed versions only show up when searching.
+            return documents.filter { $0.version == nil }.prefix(50).map { .entry($0, snippet: nil) }
         }
         let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
         var titleHits: [PaletteItem] = []
@@ -229,7 +234,9 @@ struct CommandPaletteView: View {
 
     private func icon(for item: PaletteItem) -> String {
         switch item {
-        case .entry(let document, _): return document.isVideo ? "video" : "doc.text"
+        case .entry(let document, _):
+            if document.isVideo { return "video" }
+            return document.version == nil ? "doc.text" : "clock.arrow.circlepath"
         case .command: return "command"
         case .settings: return "gearshape"
         }
@@ -237,7 +244,7 @@ struct CommandPaletteView: View {
 
     private func trailing(for item: PaletteItem) -> String {
         switch item {
-        case .entry(let document, _): return document.date
+        case .entry(let document, _): return document.version.map { "\($0) · \(document.date)" } ?? document.date
         case .command(let command): return ShortcutStore.shortcut(for: command, in: shortcutsJSON)?.displayString ?? ""
         case .settings: return "⌘,"
         }

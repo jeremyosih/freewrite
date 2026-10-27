@@ -10,7 +10,7 @@ import AppKit
 import Observation
 
 /// The single source of truth for the entries folder. Every path the app reads or writes
-/// (entries, `Videos/`, thumbnails, transcripts) is derived from `rootURL`.
+/// (entries, `Videos/`, `Entries/`, thumbnails, transcripts) is derived from `rootURL`.
 @MainActor
 @Observable
 final class EntryStorage {
@@ -28,6 +28,7 @@ final class EntryStorage {
     @ObservationIgnored private var accessedURL: URL?
 
     var videosURL: URL { rootURL.appendingPathComponent(StorageTransfer.videosDirectoryName, isDirectory: true) }
+    var versionStore: EntryVersionStore { EntryVersionStore(root: rootURL) }
     var isUsingDefault: Bool { accessedURL == nil }
 
     static let defaultRootURL: URL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -130,7 +131,7 @@ final class EntryStorage {
 
         if let mode {
             guard !StorageTransfer.overlaps(source, destination) else {
-                showAlert("Choose a different folder", "The new folder can't be inside Freewrite's Videos folder (or contain the current one there).")
+                showAlert("Choose a different folder", "The new folder can't be inside Freewrite's Videos or Entries folder (or contain the current one there).")
                 return
             }
             isTransferring = true
@@ -224,7 +225,7 @@ enum StorageTransfer {
 
     static let videosDirectoryName = "Videos"
     /// Subfolders owned by Freewrite that are transferred as a whole.
-    static let managedDirectoryNames = [videosDirectoryName]
+    static let managedDirectoryNames = [videosDirectoryName, EntryVersionStore.directoryName]
     /// Files the Finder recreates on its own; a folder holding only these counts as empty.
     private static let disposableFiles: Set<String> = [".DS_Store"]
 
