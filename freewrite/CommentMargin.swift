@@ -209,11 +209,18 @@ struct CommentColumn: View {
     private func installCardScrollMonitor() {
         guard cardScrollMonitor == nil else { return }
         cardScrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [model] event in
-            guard model.maxCardLift > 0, let window = event.window, window === model.window,
+            guard model.maxCardLift > 0 || model.activeId != nil, let window = event.window, window === model.window,
                   let content = window.contentView else { return event }
             // SwiftUI's global frames are window coordinates with y from the top.
             let point = CGPoint(x: event.locationInWindow.x, y: content.bounds.height - event.locationInWindow.y)
             guard model.cardAreaFrame.contains(point) else { return event }
+            // Scrolling the column unpins the selected card: pinned at its passage it can push the
+            // cards before it above the column, out of reach on a short entry. Unpinned, cards only
+            // ever sit at or below their passage, so the lift reaches every one of them.
+            if model.activeId != nil {
+                model.activeId = nil
+            }
+            guard model.maxCardLift > 0 else { return event }
             let delta = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 12
             model.cardLiftRequest = min(max(model.cardLift - delta, 0), model.maxCardLift)
             return nil
