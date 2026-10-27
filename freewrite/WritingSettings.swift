@@ -5,24 +5,19 @@
 //  The look of the writing page: font and size. Settings › General holds the defaults for new
 //  pages (`UserDefaults["fontName"]`, `["fontSize"]`); a page that was given its own font or size
 //  keeps it in its manifest (`Entries/<base>/entry.json`, `"writing": {"font": …, "size": …}`).
-//  Templates can carry them too. Pure model (unit-tested).
+//  Templates can carry them too. Also the favorite fonts offered in font menus. Pure model
+//  (unit-tested).
 //
 
 import Foundation
 
 enum WritingFont {
-    static let presets: [(label: String, name: String)] = [
-        ("Lato", "Lato-Regular"),
-        ("Arial", "Arial"),
-        ("System", ".AppleSystemUIFont"),
-        ("Serif", "Times New Roman"),
-    ]
     static let defaultName = "Lato-Regular"
     static let sizes: [Double] = [16, 18, 20, 22, 24, 26]
     static let defaultSize: Double = 18
 
     static func displayName(for name: String) -> String {
-        presets.first(where: { $0.name == name })?.label ?? name
+        FavoriteFonts.label(for: name)
     }
 
     /// The next size of `sizes` after `size`, wrapping from the largest to the smallest (the bar's
@@ -41,6 +36,69 @@ enum WritingFont {
         if step > 0 { return sizes.first(where: { $0 > size }) ?? size }
         if step < 0 { return sizes.last(where: { $0 < size }) ?? size }
         return size
+    }
+}
+
+extension SettingsKey {
+    static let favoriteFonts = "favoriteFonts"
+}
+
+/// The fonts offered first wherever a font is picked (bar Font menu, Settings › General,
+/// Templates), edited in Settings › General. Stored as a JSON array of font names (PostScript or
+/// family) in `UserDefaults["favoriteFonts"]`; missing or unreadable = the defaults, an empty list
+/// is kept.
+enum FavoriteFonts {
+    static let key = SettingsKey.favoriteFonts
+    static let defaults = ["Lato-Regular", "Arial", ".AppleSystemUIFont", "Times New Roman"]
+
+    /// Short names for fonts whose stored name doesn't read well.
+    private static let knownLabels = [
+        "Lato-Regular": "Lato",
+        ".AppleSystemUIFont": "System",
+        "Times New Roman": "Serif",
+    ]
+
+    /// What a font is called in menus: "Lato-Regular" → "Lato", ".AppleSystemUIFont" → "System",
+    /// "Times New Roman" → "Serif", "Georgia-Regular" → "Georgia"; family names stay as they are.
+    static func label(for name: String) -> String {
+        if let label = knownLabels[name] { return label }
+        if name.hasSuffix("-Regular"), name.count > "-Regular".count {
+            return String(name.dropLast("-Regular".count))
+        }
+        return name
+    }
+
+    /// Blank names are dropped, the first of duplicates kept.
+    static func cleaned(_ names: [String]) -> [String] {
+        var seen = Set<String>()
+        return names.compactMap { name in
+            let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty, seen.insert(name).inserted else { return nil }
+            return name
+        }
+    }
+
+    /// An empty or unreadable value means the defaults.
+    static func decode(_ json: String) -> [String] {
+        guard !json.isEmpty, let data = json.data(using: .utf8),
+              let names = try? JSONDecoder().decode([String].self, from: data) else {
+            return defaults
+        }
+        return cleaned(names)
+    }
+
+    static func encode(_ names: [String]) -> String {
+        guard let data = try? JSONEncoder().encode(cleaned(names)) else { return "" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// `names` with `name` added at the end, unless it's already there.
+    static func adding(_ name: String, to names: [String]) -> [String] {
+        cleaned(names + [name])
+    }
+
+    static func load(_ defaults: UserDefaults = .standard) -> [String] {
+        decode(defaults.string(forKey: key) ?? "")
     }
 }
 
