@@ -88,6 +88,8 @@ struct ContentView: View {
     
     @State private var isFullscreen = false
     @State private var selectedFont: String = "Lato-Regular"
+    @State private var keyDownMonitor: Any?
+    @State private var scrollWheelMonitor: Any?
     @State private var currentRandomFont: String = ""
     @State private var timeRemaining: Int = 900  // Changed to 900 seconds (15 minutes)
     @State private var timerIsRunning = false
@@ -902,14 +904,21 @@ struct ContentView: View {
                         placeholderText = placeholderOptions.randomElement() ?? "Begin writing"
                         // Removed findSubview code which was causing errors
 
-                        // Add keyboard monitor for backspace/delete keys
-                        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                        // Add keyboard monitor for backspace/delete keys (once; onAppear can fire repeatedly)
+                        guard keyDownMonitor == nil else { return }
+                        keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                             // Check if backspace is disabled and the key is delete/backspace
                             if backspaceDisabled && (event.keyCode == 51 || event.keyCode == 117) {
                                 // Block the backspace/delete key
                                 return nil
                             }
                             return event
+                        }
+                    }
+                    .onDisappear {
+                        if let keyDownMonitor {
+                            NSEvent.removeMonitor(keyDownMonitor)
+                            self.keyDownMonitor = nil
                         }
                     }
                     .overlay(
@@ -1109,7 +1118,8 @@ struct ContentView: View {
                                 }
                             }
                             .onAppear {
-                                NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+                                guard scrollWheelMonitor == nil else { return }
+                                scrollWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
                                     if isHoveringTimer {
                                         let scrollBuffer = event.deltaY * 0.25
                                         
@@ -1124,6 +1134,12 @@ struct ContentView: View {
                                         }
                                     }
                                     return event
+                                }
+                            }
+                            .onDisappear {
+                                if let scrollWheelMonitor {
+                                    NSEvent.removeMonitor(scrollWheelMonitor)
+                                    self.scrollWheelMonitor = nil
                                 }
                             }
 
