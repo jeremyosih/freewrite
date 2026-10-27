@@ -154,6 +154,11 @@ struct ReviewerBuilderToolboxTests {
         #expect(second.draft.color == .orange)
         #expect(second.original == editor)
         #expect(second.changes.map(\.field).contains("Instructions"))
+        // Named by name instead of id: still builds on the draft.
+        let third = try toolbox.propose(ReviewerProposalInput(id: "Editor", scope: "all"))
+        #expect(third.draft.instructions == "Be harsh.")
+        #expect(third.draft.id == "editor")
+        #expect(third.original == editor)
     }
 
     @Test func listings() throws {

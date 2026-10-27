@@ -178,10 +178,15 @@ struct ReviewerBuilderToolbox {
 
     private func find(_ id: String) -> ReviewerProfile? {
         let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
-        // The latest unsaved draft wins over the saved reviewer, so revising an edit keeps earlier changes.
-        return drafts[trimmed]
-            ?? profiles.first { $0.id == trimmed }
-            ?? profiles.first { $0.name.compare(trimmed, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame }
+        // The latest unsaved draft wins over the saved reviewer, whether it's named by id or by name,
+        // so revising an edit keeps earlier changes.
+        if let draft = drafts[trimmed] { return draft }
+        let sameName = { (name: String) in name.compare(trimmed, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame }
+        if let saved = profiles.first(where: { $0.id == trimmed }) ?? profiles.first(where: { sameName($0.name) }) {
+            return drafts[saved.id] ?? saved
+        }
+        // An unsaved draft (new or renamed) named by its draft name.
+        return drafts.values.sorted { $0.id < $1.id }.first { sameName($0.name) }
     }
 
     // MARK: Proposing
