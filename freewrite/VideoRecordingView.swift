@@ -10,7 +10,9 @@ import AVFoundation
 import AppKit
 import Speech
 
-class CameraManager: NSObject, ObservableObject {
+// Not actor-isolated: capture work runs on sessionQueue, speech buffers arrive on speechQueue,
+// and UI-facing state is only touched after hopping to the main queue.
+final class CameraManager: NSObject, ObservableObject, @unchecked Sendable {
     @Published var isRecording = false
     @Published var recordingTime: Int = 0
     @Published var permissionGranted = false
@@ -68,15 +70,17 @@ class CameraManager: NSObject, ObservableObject {
         hasNotifiedReady = false
         hasNotifiedCannotRecord = false
         requestSpeechPermissionIfNeeded { [weak self] in
-            self?.requestCameraPermissionIfNeeded {
-                self?.requestMicrophonePermissionIfNeeded {
+            guard let self else { return }
+            self.requestCameraPermissionIfNeeded { [weak self] in
+                guard let self else { return }
+                self.requestMicrophonePermissionIfNeeded { [weak self] in
                     self?.evaluateCapturePermissionsAndSetup()
                 }
             }
         }
     }
 
-    private func requestSpeechPermissionIfNeeded(completion: @escaping () -> Void) {
+    private func requestSpeechPermissionIfNeeded(completion: @escaping @Sendable () -> Void) {
         switch SFSpeechRecognizer.authorizationStatus() {
         case .authorized:
             speechPermissionGranted = true
@@ -101,7 +105,7 @@ class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func requestCameraPermissionIfNeeded(completion: @escaping () -> Void) {
+    private func requestCameraPermissionIfNeeded(completion: @escaping @Sendable () -> Void) {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             permissionGranted = true
@@ -120,7 +124,7 @@ class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func requestMicrophonePermissionIfNeeded(completion: @escaping () -> Void) {
+    private func requestMicrophonePermissionIfNeeded(completion: @escaping @Sendable () -> Void) {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             microphonePermissionGranted = true
@@ -235,7 +239,9 @@ class CameraManager: NSObject, ObservableObject {
         attachPreviewLayerIfNeeded(session: captureSession)
     }
 
-    private func attachPreviewLayerIfNeeded(session captureSession: AVCaptureSession) {
+    private func attachPreviewLayerIfNeeded(session: AVCaptureSession) {
+        // AVCaptureSession is documented thread-safe; the preview layer is created on main.
+        nonisolated(unsafe) let captureSession = session
         DispatchQueue.main.async {
             if self.previewLayer?.session !== captureSession {
                 let layer = AVCaptureVideoPreviewLayer(session: captureSession)
@@ -369,12 +375,14 @@ class CameraManager: NSObject, ObservableObject {
 
         speechRecognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
             guard let self = self else { return }
+            let recognized = result.map { ($0.bestTranscription.formattedString, $0.isFinal) }
+            let failed = error != nil
             DispatchQueue.main.async {
-                if let result {
-                    self.processRecognitionResult(result)
+                if let (text, isFinal) = recognized {
+                    self.processRecognitionResult(text: text, isFinal: isFinal)
                 }
 
-                if error != nil {
+                if failed {
                     self.stopLiveCaptionRecognition(clearText: false)
                     self.scheduleLiveCaptionRestart()
                 }
@@ -404,8 +412,8 @@ class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func processRecognitionResult(_ result: SFSpeechRecognitionResult) {
-        let fullText = normalizeCaptionText(result.bestTranscription.formattedString)
+    private func processRecognitionResult(text: String, isFinal: Bool) {
+        let fullText = normalizeCaptionText(text)
         latestRecognitionText = fullText
 
         let fullNSString = fullText as NSString
@@ -415,7 +423,7 @@ class CameraManager: NSObject, ObservableObject {
         let liveChunk = fullLength > committedCharacterOffset ? fullNSString.substring(from: committedCharacterOffset) : ""
         liveCaptionText = normalizeCaptionText(liveChunk)
 
-        if result.isFinal {
+        if isFinal {
             commitPendingLiveTranscript(asParagraph: true)
             captionPauseCommitWorkItem?.cancel()
             captionPauseCommitWorkItem = nil

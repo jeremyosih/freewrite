@@ -1,4 +1,3 @@
-// Swift 5.0
 //
 //  ContentView.swift
 //  freewrite
