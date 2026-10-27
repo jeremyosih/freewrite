@@ -38,11 +38,6 @@ Freewrite is a **distraction-free writing environment** for macOS designed aroun
 - One-click recording with built-in timer
 - Local storage ensures privacy for personal video journals
 
-**Tertiary Use Case - AI-Assisted Reflection:**
-- "Chat" button sends writing to ChatGPT or Claude
-- Prompts designed to help users reflect on and understand their writing
-- AI provides feedback, questions, or analysis of stream-of-consciousness text
-
 **Hidden Power Feature - Long-Form Writing:**
 - Despite minimalist interface, supports full markdown
 - Entries can be exported as PDFs
@@ -75,6 +70,7 @@ freewrite/
 │   ├── SettingsView.swift        # Settings window (⌘,), stored settings keys, shortcuts + menu commands
 │   ├── Transcription.swift       # Transcription engines: Apple (live, on-device) or Hex local API client
 │   ├── CommandPalette.swift      # ⌘K palette: full-text entry search + actions
+│   ├── BottomBar.swift           # Bottom bar layout model (item, side, order) + Settings › Bottom Bar pane
 │   ├── WritingEditor.swift       # TextKit 2 NSTextView editor: markdown styling, highlights + hover comments
 │   ├── MarkdownStyling.swift     # Pure logic: markdown span ranges, EditorHighlight + range adjustment
 │   ├── Storage.swift             # EntryStorage (entries folder + bookmark) and StorageTransfer (move/copy)
@@ -236,8 +232,8 @@ struct VideoPlayerView: View {
 │                                                         │
 ├─────────────────────────────────────────────────────────┤
 │  Bottom Nav Bar:                                        │
-│                [15:00] • [🎥] • [Chat] • [Backspace] •  │
-│        [Fullscreen] • [New Entry] • [🕐] • [⚙︎]          │
+│        [15:00] • [🎥] • [Backspace] • [Fullscreen] •     │
+│        [New Entry] • [🕐] • [⚙︎]   (customizable)        │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -260,21 +256,12 @@ struct VideoPlayerView: View {
 
 ## Navigation Bar Items
 
-### Left Side
-- Empty for text entries (font controls moved to Settings)
-- **Video Mode Left Slot**: `Copy Transcript` when viewing a video entry
-- **Text Mode Left Slot**: `vN ⌃` version menu (only once an entry has >1 version or a voice note; lists versions + "New Version"), `Play voice note` for the current version's audio, and transient status (`Transcribing…`, errors)
-
-### Right Side (Utilities)
-- **Timer**: Shows time remaining, click to start/stop, double-click to reset (to the Settings session length)
-- **Video Camera (🎥)**: Opens immersive video recording overlay
-- **Microphone (🎙)**: Records an audio-only voice note; while recording the utility buttons are replaced by `● 3:42 ▁▃▅ Stop • Discard`
-- **Chat**: Opens AI chat menu (ChatGPT/Claude integration)
-- **Backspace Toggle**: Enable/disable backspace key
-- **Fullscreen**: Toggle fullscreen mode
-- **New Entry**: Creates new text entry
-- **History**: 🕐 Shows/hides sidebar
-- **Settings**: ⚙︎ `SettingsLink` opening the Settings window
+### Bottom Bar (customizable, `BottomBar.swift`)
+- Items: Versions (`vN ⌃` menu: list/switch versions, New Version; default left), Timer, Record Video, Record Voice Note (🎙; while recording the bar becomes `● 3:42 ▁▃▅ Stop • Discard`), Backspace Toggle, Fullscreen, New Entry, History, Settings. Each is Left, Right or Hidden, in a user-defined order (Settings › Bottom Bar, drag to reorder, live preview). Stored as JSON in `UserDefaults["bottomBarLayout"]`; unknown items are dropped and new ones are added at their default side.
+- `ContentView.bottomBarItemView(_:)` renders each item; `bottomBarGroup` adds the `•` separators. Versions, Voice Note and Backspace are writing-only (hidden on video entries).
+- Fixed status slots at the start of the left side: text entries show `Play voice note` for the current version's audio and transient status (`Transcribing…`, errors); video entries show `Copy Transcript` / transcription status.
+- Hidden items stay reachable from the menu bar, ⌘K and shortcuts. The gear and ⌘, toggle the Settings window (`SettingsWindow.toggle`).
+- The Chat (ChatGPT/Claude) feature was removed.
 
 ### Settings Window & Shortcuts (`SettingsView.swift`)
 - `Settings { SettingsView() }` scene in `freewriteApp.swift`; tabs: Writing (font, size, theme, timer length), Transcription, Storage (entries folder), Shortcuts.
@@ -819,27 +806,6 @@ Example: 18px font → target 27px line height → natural 21px → add 6px spac
 
 This creates **generous vertical rhythm** for readability during long writing sessions.
 
-### Chat Integration
-
-**Prompts**:
-```swift
-let aiChatPrompt = "You are a writing coach. Help me understand what I wrote below and ask me questions about it:\n\n"
-let claudePrompt = "You are a thoughtful writing partner. Read what I wrote and help me explore the ideas further:\n\n"
-```
-
-**URL Encoding**:
-```swift
-let fullText = aiChatPrompt + "\n\n" + trimmedText
-if let encodedText = fullText.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-   let url = URL(string: "https://chat.openai.com/?prompt=" + encodedText) {
-    NSWorkspace.shared.open(url)
-}
-```
-
-**Length Handling**:
-- URLs >6000 chars fail in some browsers
-- If too long, shows "Copy Prompt" button instead
-- Copies to clipboard for manual paste
 
 ### PDF Export Implementation
 

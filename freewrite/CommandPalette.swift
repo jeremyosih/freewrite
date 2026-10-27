@@ -103,6 +103,7 @@ struct CommandPaletteView: View {
     /// Tracked by id so results arriving later don't change what Return opens.
     @State private var highlightedID: String?
     @FocusState private var searchFocused: Bool
+    @State private var listHeight: CGFloat = 0
 
     /// Empty query: recent entries, then every action. Otherwise: matching actions, then entries.
     private static func search(_ query: String, in documents: [PaletteDocument]) -> [PaletteItem] {
@@ -172,8 +173,10 @@ struct CommandPaletteView: View {
                                 }
                             }
                             .padding(6)
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
                         }
-                        .frame(maxHeight: 380)
+                        // Shrink to the rows; scroll only past 380 pt.
+                        .frame(height: min(max(listHeight, 1), 380))
                         .onChange(of: highlightedID) { _, id in
                             if let id {
                                 proxy.scrollTo(id)
