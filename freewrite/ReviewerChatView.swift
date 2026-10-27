@@ -274,9 +274,10 @@ private struct ReviewerProposalCard: View {
             .font(.system(size: 11.5))
 
             if proposal.isNew {
+                // In full: Save writes all of it, so all of it must be readable first.
                 Text(draft.instructions)
                     .font(.system(size: 11.5))
-                    .lineLimit(8)
+                    .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -316,9 +317,9 @@ private struct ReviewerProposalCard: View {
                         Text(change.before)
                             .strikethrough()
                             .foregroundStyle(.secondary)
-                            .lineLimit(4)
+                            .fixedSize(horizontal: false, vertical: true)
                         Text(change.after)
-                            .lineLimit(8)
+                            .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                     } else {
                         HStack(spacing: 5) {

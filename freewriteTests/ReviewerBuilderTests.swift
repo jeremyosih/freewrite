@@ -143,6 +143,19 @@ struct ReviewerBuilderToolboxTests {
         #expect(toolbox.summary(of: second).contains("call propose_reviewer again with id \(first.draft.id)"))
     }
 
+    @Test func revisingAnUnsavedEditKeepsEarlierChanges() throws {
+        let editor = try #require(ReviewerProfile.defaults.first { $0.id == "editor" })
+        var toolbox = ReviewerBuilderToolbox(profiles: [editor], catalog: catalog)
+        let first = try toolbox.propose(ReviewerProposalInput(id: "editor", instructions: "Be harsh."))
+        toolbox.drafts[first.draft.id] = first.draft
+        // "Keep Chatting", then a second change: the first one stays, compared with the saved reviewer.
+        let second = try toolbox.propose(ReviewerProposalInput(id: "editor", color: "orange"))
+        #expect(second.draft.instructions == "Be harsh.")
+        #expect(second.draft.color == .orange)
+        #expect(second.original == editor)
+        #expect(second.changes.map(\.field).contains("Instructions"))
+    }
+
     @Test func listings() throws {
         let reviewers = toolbox.listReviewers()
         #expect(reviewers.contains("editor · Editor · Automatic · kinds: grammar, clarity, structure"))

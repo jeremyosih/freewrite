@@ -114,7 +114,8 @@ struct ReviewerBuilderToolbox {
     /// Saved reviewers (`UserDefaults["reviewers"]`).
     var profiles: [ReviewerProfile]
     var catalog: ReviewerBuilderCatalog
-    /// New reviewers proposed earlier in this chat and not saved yet, by id, so a revision keeps its id.
+    /// Reviewers proposed earlier in this chat and not saved yet (new ones and edits), by id, so a
+    /// revision builds on the latest draft and keeps its id.
     var drafts: [String: ReviewerProfile] = [:]
 
     static let maxNameLength = 60
@@ -177,8 +178,9 @@ struct ReviewerBuilderToolbox {
 
     private func find(_ id: String) -> ReviewerProfile? {
         let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
-        return profiles.first { $0.id == trimmed }
-            ?? drafts[trimmed]
+        // The latest unsaved draft wins over the saved reviewer, so revising an edit keeps earlier changes.
+        return drafts[trimmed]
+            ?? profiles.first { $0.id == trimmed }
             ?? profiles.first { $0.name.compare(trimmed, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame }
     }
 
@@ -418,8 +420,10 @@ final class ReviewerChat: Identifiable {
     var proposal: ReviewerProposal?
     /// Name of the reviewer the user just saved, for the confirmation line.
     var savedName: String?
-    /// Unsaved new reviewers proposed in this chat, by id.
+    /// Unsaved drafts proposed in this chat (new reviewers and edits), by id.
     var drafts: [String: ReviewerProfile] = [:]
+    /// The sheet closed: nothing may start or register for this chat any more.
+    var isClosed = false
 
     var lastSubmitted: String?
     var conversation: Conversation?
@@ -578,7 +582,7 @@ final class ReviewerChatService {
     /// Sends what the user typed and waits for the answer. Errors land in `chat.error`.
     func send(_ text: String, in chat: ReviewerChat) async {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !chat.isRunning else { return }
+        guard !text.isEmpty, !chat.isRunning, !chat.isClosed else { return }
         chat.isRunning = true
         chat.error = nil
         chat.stopRequested = false
@@ -591,6 +595,8 @@ final class ReviewerChatService {
         }
         do {
             let conversation = try await conversation(for: chat)
+            // Stop or close during setup: don't send.
+            guard !chat.stopRequested, !chat.isClosed else { return }
             chat.submissions += 1
             let record = try await conversation.submit(text, requestId: "\(chat.id.uuidString):\(chat.submissions)").wait()
             if let view = try? await conversation.view() { chat.apply(view) }
@@ -618,6 +624,7 @@ final class ReviewerChatService {
 
     /// The sheet closed: stop and forget the chat.
     func close(_ chat: ReviewerChat) {
+        chat.isClosed = true
         stop(chat)
         chat.watcher?.cancel()
         chat.watcher = nil
@@ -635,6 +642,11 @@ final class ReviewerChatService {
         }
         let harness = try await openHarness()
         let conversation = try await harness.createConversation(agent: AgentChange(model: model, instructions: Self.seed(for: chat.editing)))
+        // Closed while it was being set up: never register it (cleanup already ran).
+        guard !chat.isClosed else {
+            Task { try? await conversation.abort() }
+            throw CancellationError()
+        }
         chat.conversation = conversation
         chats[conversation.id] = chat
         chat.watcher = Task { [weak chat] in
@@ -733,7 +745,7 @@ final class ReviewerChatService {
                  ]), replay: .safe) { [weak self] (arguments: ReviewerProposalInput, context) in
                 await self?.withToolbox(context) { toolbox, chat in
                     let proposal = try toolbox.propose(arguments)
-                    if proposal.isNew { chat.drafts[proposal.draft.id] = proposal.draft }
+                    chat.drafts[proposal.draft.id] = proposal.draft
                     chat.proposal = proposal
                     return toolbox.summary(of: proposal)
                 } ?? .error("Freewrite is closing.")
