@@ -146,6 +146,9 @@ struct WritingEditor: NSViewRepresentable {
             textView.highlightMenuItem = { [weak self] point in
                 self?.dismissMenuItem(at: point)
             }
+            textView.underlineSegments = { [weak self] in
+                self?.underlineSegments() ?? []
+            }
             scrollView.contentView.postsBoundsChangedNotifications = true
             NotificationCenter.default.addObserver(
                 self,
@@ -250,6 +253,23 @@ struct WritingEditor: NSViewRepresentable {
                 guard let textRange = textRange(for: highlight.range) else { continue }
                 layoutManager.addRenderingAttribute(.backgroundColor, value: highlight.color, for: textRange)
             }
+            // TextKit 2 doesn't draw underline rendering attributes, so squiggles are drawn by an overlay.
+            textView.underlinesChanged()
+        }
+
+        /// Line segments (text view coordinates) of the highlights that want a squiggle.
+        private func underlineSegments() -> [(rect: NSRect, color: NSColor)] {
+            guard let textView, let layoutManager = textView.textLayoutManager else { return [] }
+            let origin = textView.textContainerOrigin
+            var segments: [(rect: NSRect, color: NSColor)] = []
+            for highlight in drawnHighlights {
+                guard let color = highlight.underlineColor, let textRange = textRange(for: highlight.range) else { continue }
+                layoutManager.enumerateTextSegments(in: textRange, type: .highlight, options: []) { _, frame, _, _ in
+                    segments.append((frame.offsetBy(dx: origin.x, dy: origin.y), color))
+                    return true
+                }
+            }
+            return segments
         }
 
         /// nil for empty ranges or ranges outside the current string.
@@ -328,6 +348,8 @@ struct WritingEditor: NSViewRepresentable {
             popover.animates = false
             popover.appearance = theme?.appearance
             let controller = NSHostingController(rootView: HighlightCommentView(
+                title: highlight.title,
+                titleColor: highlight.titleColor,
                 comment: highlight.comment,
                 hint: onDismissHighlight == nil ? nil : "Right-click to dismiss"
             ))
@@ -379,7 +401,39 @@ final class WritingTextView: NSTextView {
     var highlightMenuItem: ((NSPoint) -> NSMenuItem?)?
     /// Become first responder as soon as the view lands in a window.
     var focusWhenAttached = false
+    /// Where to draw squiggly underlines (grammar notes), asked for on every redraw.
+    var underlineSegments: (() -> [(rect: NSRect, color: NSColor)])?
     private var hoverTrackingArea: NSTrackingArea?
+    private lazy var underlineOverlay: UnderlineOverlayView = {
+        let overlay = UnderlineOverlayView(frame: bounds)
+        overlay.autoresizingMask = [.width, .height]
+        overlay.segments = { [weak self] in self?.underlineSegments?() ?? [] }
+        return overlay
+    }()
+
+    /// Redraws the squiggles (after highlights, text or layout changed).
+    func underlinesChanged() {
+        if underlineOverlay.superview !== self {
+            addSubview(underlineOverlay, positioned: .above, relativeTo: nil)
+        }
+        underlineOverlay.needsDisplay = true
+    }
+
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        // TextKit 2 adds fragment views as it lays out; keep the squiggles above the text.
+        if subview !== underlineOverlay, underlineOverlay.superview === self {
+            addSubview(underlineOverlay, positioned: .above, relativeTo: nil)
+        }
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        // Rewrapped lines move the squiggles.
+        if underlineOverlay.superview === self {
+            underlineOverlay.needsDisplay = true
+        }
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -428,12 +482,59 @@ final class WritingTextView: NSTextView {
     }
 }
 
+/// Draws wavy underlines, like a spelling mark, on top of the text. Never takes clicks.
+final class UnderlineOverlayView: NSView {
+    var segments: (() -> [(rect: NSRect, color: NSColor)])?
+
+    override var isFlipped: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        for segment in segments?() ?? [] where segment.rect.intersects(dirtyRect.insetBy(dx: 0, dy: -4)) {
+            let path = NSBezierPath()
+            let amplitude: CGFloat = 1.3
+            let wavelength: CGFloat = 4
+            let y = segment.rect.maxY - 1.5
+            var x = segment.rect.minX
+            path.move(to: NSPoint(x: x, y: y))
+            var up = true
+            while x < segment.rect.maxX {
+                let next = min(x + wavelength / 2, segment.rect.maxX)
+                path.curve(to: NSPoint(x: next, y: y),
+                           controlPoint1: NSPoint(x: x + wavelength / 4, y: y + (up ? -amplitude : amplitude) * 2),
+                           controlPoint2: NSPoint(x: next - wavelength / 4, y: y + (up ? -amplitude : amplitude) * 2))
+                x = next
+                up.toggle()
+            }
+            path.lineWidth = 1.2
+            segment.color.setStroke()
+            path.stroke()
+        }
+    }
+}
+
 private struct HighlightCommentView: View {
+    var title: String? = nil
+    var titleColor: NSColor? = nil
     let comment: String
     var hint: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let title {
+                HStack(spacing: 6) {
+                    if let titleColor {
+                        Circle()
+                            .fill(Color(nsColor: titleColor))
+                            .frame(width: 7, height: 7)
+                    }
+                    Text(title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+            }
             Text(comment)
                 .font(.system(size: 13))
                 .fixedSize(horizontal: false, vertical: true)

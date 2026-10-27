@@ -3408,19 +3408,23 @@ extension ContentView {
         [selectedTextEntry?.filename ?? "", entryManifest?.current ?? "", storage.rootURL.path].joined(separator: "|")
     }
 
-    /// Active notes of the version on screen, coloured per reviewer.
+    /// Active notes of the version on screen, coloured per kind of note.
     private var editorHighlights: [EditorHighlight] {
         guard let version = displayedVersion, annotationsEntryId == selectedEntryId, !annotations.isEmpty else { return [] }
         let profiles = Dictionary(reviewerProfiles.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return annotations
             .filter { $0.versionId == version.id && $0.status == .active }
             .map { annotation in
-                let profile = profiles[annotation.reviewerId]
+                let kind = annotation.resolvedKind
+                let reviewer = profiles[annotation.reviewerId]?.name ?? annotation.reviewerId.capitalized
                 return EditorHighlight(
                     id: annotation.id,
                     range: annotation.anchor.range,
-                    color: (profile?.color ?? .yellow).highlightColor,
-                    comment: "\(profile?.name ?? annotation.reviewerId.capitalized) — \(annotation.comment)"
+                    color: kind.highlightColor,
+                    comment: annotation.comment,
+                    title: "\(kind.title) · \(reviewer)",
+                    titleColor: kind.nsColor,
+                    underlineColor: kind.underlineColor
                 )
             }
     }
@@ -3687,6 +3691,10 @@ extension ContentView {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
             }
+            Divider()
+            AnnotationKindLegend(notes: versionNotes.filter { $0.status == .active })
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
             Divider()
             if !versionNotes.isEmpty {
                 reviewMenuRow {
