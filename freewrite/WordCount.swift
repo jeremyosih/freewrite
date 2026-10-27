@@ -28,6 +28,8 @@ struct TextCount: Equatable, Sendable {
         var inWord = false
         // A joiner (apostrophe, hyphen…) right after a word: the word goes on if a letter follows.
         var pendingJoiner = false
+        // `.`/`,` after a digit: the word goes on only if another digit follows (`3.14`, not `1.First`).
+        var pendingNumberJoiner = false
         var previousWasDigit = false
         for scalar in text.unicodeScalars {
             let properties = scalar.properties
@@ -35,22 +37,27 @@ struct TextCount: Equatable, Sendable {
                 words += 1
                 inWord = false
                 pendingJoiner = false
+                pendingNumberJoiner = false
                 previousWasDigit = false
                 continue
             }
             let isDigit = properties.numericType != nil
             if properties.isAlphabetic || isDigit || (inWord && !pendingJoiner && Self.isMark(properties)) {
-                if !inWord {
+                if !inWord || (pendingNumberJoiner && !isDigit) {
                     words += 1
                     inWord = true
                 }
                 pendingJoiner = false
-            } else if inWord && !pendingJoiner
-                        && (Self.wordJoiners.contains(scalar) || (previousWasDigit && Self.numberJoiners.contains(scalar))) {
+                pendingNumberJoiner = false
+            } else if inWord && !pendingJoiner && Self.wordJoiners.contains(scalar) {
                 pendingJoiner = true
+            } else if inWord && !pendingJoiner && previousWasDigit && Self.numberJoiners.contains(scalar) {
+                pendingJoiner = true
+                pendingNumberJoiner = true
             } else {
                 inWord = false
                 pendingJoiner = false
+                pendingNumberJoiner = false
             }
             previousWasDigit = isDigit
         }
@@ -89,9 +96,15 @@ struct TextCount: Equatable, Sendable {
         }
     }
 
-    /// Han ideographs, Hiragana, Katakana (incl. half-width) and the iteration marks.
+    /// Han ideographs and the letters of Hiragana and Katakana (incl. half-width, the long-vowel and
+    /// iteration marks). Punctuation (`・`, `「`) and combining marks (dakuten) in those blocks aren't
+    /// words, so `か` + U+3099 counts like `が`.
     private static func isSpacelessScript(_ scalar: Unicode.Scalar) -> Bool {
         if scalar.properties.isIdeographic { return true }
+        switch scalar.properties.generalCategory {
+        case .otherLetter, .modifierLetter: break
+        default: return false
+        }
         switch scalar.value {
         case 0x3040...0x309F, 0x30A0...0x30FF, 0x31F0...0x31FF, 0xFF66...0xFF9D: return true
         default: return false

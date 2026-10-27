@@ -207,6 +207,9 @@ struct ContentView: View {
     @State private var mainAreaFrame: CGRect = .zero
     /// Whether History was open when focus mode started; it comes back with the bar.
     @State private var sidebarBeforeFocus = false
+    /// Whether the editor kept its bar strip when focus mode started (the running timer may have
+    /// faded the bar already); focus mode keeps that padding so the text never moves.
+    @State private var focusKeepsBarStrip = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHoveringReview = false
     /// Keys of locked notes while they are open (Touch ID / Apple Watch / password).
@@ -1952,8 +1955,8 @@ struct ContentView: View {
                     .background(Color(colorScheme == .light ? .white : .black))
                     .frame(maxWidth: 650)
                     .padding(.top, editorTopMargin)
-                    // Focus mode keeps the strip: the text doesn't move, and scrolling up there brings the bar back.
-                    .padding(.bottom, bottomNavOpacity > 0 || focusMode ? navHeight : 0)
+                    // Focus mode keeps whatever padding it started with, so the text never moves; scrolling up there brings the bar back.
+                    .padding(.bottom, bottomNavOpacity > 0 || (focusMode && focusKeepsBarStrip) ? navHeight : 0)
                     .colorScheme(colorScheme)
                     .onAppear {
                         placeholderText = placeholderOptions.randomElement() ?? "Begin writing"
@@ -2501,6 +2504,7 @@ struct ContentView: View {
     private func enterFocusMode() {
         guard !focusMode, canEnterFocusMode else { return }
         closeBarMenu()
+        focusKeepsBarStrip = bottomNavOpacity > 0
         focusMode = true
         withAnimation(.easeIn(duration: 0.4)) {
             bottomNavOpacity = 0
@@ -2987,7 +2991,8 @@ struct ContentView: View {
         selectedVideoHasTranscript = false
         didCopyTranscript = false
         closeLockedNote()
-        resetVersionState(for: nil)
+        // Its implicit v1 manifest, so the version, word count and voice-note controls show right away.
+        resetVersionState(for: newEntry)
         historyDebug("NEW ENTRY created \(debugEntrySummary(newEntry))")
         logEntriesOrder("createNewEntry")
 

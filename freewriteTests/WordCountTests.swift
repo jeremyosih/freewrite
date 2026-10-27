@@ -28,6 +28,8 @@ struct TextCountTests {
         #expect(words("a--b") == 2)
         #expect(words("pi is 3.14, about 1,000 times") == 6)
         #expect(words("end.Next") == 2)
+        #expect(words("1.First 2,second") == 4)
+        #expect(words("version 2.0.1") == 2)
     }
 
     @Test func markdownMarkersAreNotWords() {
@@ -41,6 +43,8 @@ struct TextCountTests {
         #expect(words("我爱你") == 3)
         #expect(words("今日はいい天気") == 7)
         #expect(words("カタカナ") == 4)
+        #expect(words("カ・ナ「ね」") == 3)
+        #expect(words("か\u{3099}") == words("が"))
         #expect(words("I said 你好 today") == 5)
         // Korean uses spaces.
         #expect(words("안녕하세요 세계") == 2)
