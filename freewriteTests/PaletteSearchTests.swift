@@ -21,7 +21,7 @@ struct PaletteSearchTests {
         let results = PaletteSearch.results(for: "  ", in: PaletteIndex(entries))
         #expect(titles(Array(results.prefix(8))) == (0..<8).map { "Entry \($0)" })
         let actions = results.dropFirst(8)
-        #expect(actions.count == AppCommand.allCases.count) // every command but the palette, plus Settings
+        #expect(actions.count == AppCommand.allCases.count + 1) // every command but the palette, Reviewers & Models…, Settings
         #expect(!actions.contains { $0.id == "command-commandPalette" })
         #expect(actions.last?.id == "settings")
     }
@@ -89,6 +89,26 @@ struct PaletteSearchTests {
         #expect(titles(results) == ["Record Video", "Record Voice Note", "Record of the day"])
         let many = PaletteSearch.results(for: "e", in: PaletteIndex([]))
         #expect(many.count == 4)
+    }
+
+    @Test func reviewersCanBeRunFromThePalette() {
+        let actions = PaletteReviewActions(
+            versionId: "v2",
+            reviewers: [.init(id: "editor", name: "Editor"), .init(id: "mirror", name: "Mirror")],
+            noteCount: 3
+        )
+        let index = PaletteIndex([document("Editorial thoughts")], reviewActions: actions)
+        #expect(titles(PaletteSearch.results(for: "review with", in: index)) == ["Review with…", "Review with Editor", "Review with Mirror"])
+        #expect(titles(PaletteSearch.results(for: "rwm", in: index)).first == "Review with Mirror")
+        #expect(titles(PaletteSearch.results(for: "clear", in: index)) == ["Clear Review (3 notes)"])
+        let empty = titles(PaletteSearch.results(for: "", in: index))
+        #expect(empty.contains("Review with Editor") && empty.contains("Reviewers & Models…"))
+    }
+
+    @Test func noReviewersWithoutSomethingToReview() {
+        let titles = titles(PaletteSearch.results(for: "review", in: PaletteIndex([])))
+        #expect(!titles.contains { $0.hasPrefix("Review with ") || $0.hasPrefix("Clear Review") })
+        #expect(titles.contains("Reviewers & Models…"))
     }
 
     @Test func cancelledSearchStopsEarly() async {

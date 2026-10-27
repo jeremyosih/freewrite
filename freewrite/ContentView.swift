@@ -1015,6 +1015,7 @@ struct ContentView: View {
             return (entry, getDocumentsDirectory().appendingPathComponent(entry.filename))
         }
         let store = versionStore
+        let reviewActions = paletteReviewActions
         Task {
             let index = await Task.detached(priority: .userInitiated) {
                 PaletteIndex(sources.flatMap { source in
@@ -1037,7 +1038,7 @@ struct ContentView: View {
                         )
                     }
                     return [current] + sealed
-                })
+                }, reviewActions: reviewActions)
             }.value
             if showingCommandPalette && paletteLoadID == loadID {
                 paletteIndex = index
@@ -1055,9 +1056,27 @@ struct ContentView: View {
             }
         case .command(let command):
             handle(command)
+        case .review(let reviewer, _):
+            if let profile = reviewerProfiles.first(where: { $0.id == reviewer.id }) {
+                startReview(profile)
+            }
+        case .clearReview:
+            clearReview()
+        case .reviewerSettings:
+            openReviewerSettings()
         case .settings:
             SettingsWindow.toggle(openSettings)
         }
+    }
+
+    /// Review actions for the version on screen; reviewers only when a review could start now.
+    private var paletteReviewActions: PaletteReviewActions {
+        guard selectedTextEntry != nil, !isSelectedNoteClosed, let version = displayedVersion else { return .none }
+        return PaletteReviewActions(
+            versionId: version.id,
+            reviewers: runningReview == nil ? reviewerProfiles.map { .init(id: $0.id, name: $0.name) } : [],
+            noteCount: annotations.filter { $0.versionId == version.id && $0.status != .dismissed }.count
+        )
     }
 
     private func handle(_ command: AppCommand) {
@@ -3505,6 +3524,13 @@ extension ContentView {
     }
 
     // MARK: Running
+
+    private func openReviewerSettings() {
+        UserDefaults.standard.set("agents", forKey: "settingsPane")
+        if SettingsWindow.window == nil {
+            SettingsWindow.toggle(openSettings)
+        }
+    }
 
     private func openReviewMenu() {
         guard selectedTextEntry != nil, !voiceRecorder.isRecording, !showingVideoRecording else {
