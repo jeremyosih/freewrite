@@ -2684,8 +2684,10 @@ struct ContentView: View {
 
     /// Any installed family other than the favorites and the current font.
     private func chooseRandomFont() {
-        let favorites = Set(FavoriteFonts.decode(favoriteFontsJSON))
-        let current = selectedFont
+        // By family, so the default "Lato-Regular" also rules out "Lato".
+        let family = { (name: String) in NSFont(name: name, size: 12)?.familyName ?? name }
+        let favorites = Set(FavoriteFonts.decode(favoriteFontsJSON).map(family))
+        let current = family(selectedFont)
         guard let random = NSFontManager.shared.availableFontFamilies
             .filter({ !favorites.contains($0) && $0 != current })
             .randomElement() else { return }

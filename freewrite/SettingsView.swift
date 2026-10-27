@@ -512,8 +512,10 @@ private struct GeneralSettingsView: View {
 
                 HStack {
                     Spacer()
+                    // Same as the bar's Random: an installed family that isn't a favorite or the current font.
                     Button("Random Font") {
-                        if let random = allFamilies.randomElement() {
+                        let current = Self.family(of: fontName)
+                        if let random = allFamilies.filter({ !favoriteFamilies.contains($0) && $0 != current }).randomElement() {
                             fontName = random
                         }
                     }
@@ -551,8 +553,11 @@ private struct GeneralSettingsView: View {
                         Label("Add Font…", systemImage: "plus")
                     }
                     .popover(isPresented: $showingAddFavorite, arrowEdge: .bottom) {
-                        AddFavoriteFontView(families: allFamilies.filter { !favorites.contains($0) }) { family in
-                            setFavorites(FavoriteFonts.adding(family, to: favorites))
+                        // Compared by family: "Lato" is already there as the default "Lato-Regular".
+                        AddFavoriteFontView(families: allFamilies.filter { !favoriteFamilies.contains($0) }) { family in
+                            if !favoriteFamilies.contains(family) {
+                                setFavorites(FavoriteFonts.adding(family, to: favorites))
+                            }
                             showingAddFavorite = false
                         }
                     }
@@ -595,6 +600,15 @@ private struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// Family names of the favorites ("Lato-Regular" → "Lato"), for comparing with installed families.
+    private var favoriteFamilies: Set<String> {
+        Set(favorites.map(Self.family(of:)))
+    }
+
+    private static func family(of name: String) -> String {
+        NSFont(name: name, size: 12)?.familyName ?? name
     }
 
     private func setFavorites(_ names: [String]) {
