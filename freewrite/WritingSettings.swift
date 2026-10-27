@@ -31,12 +31,16 @@ enum WritingFont {
         sizes.first(where: { $0 > size }) ?? sizes[0]
     }
 
-    /// One step bigger (`step` 1) or smaller (-1) within `sizes`, stopping at the ends.
+    /// One step bigger (`step` 1) or smaller (-1) within `sizes`, stopping at the ends. A size that
+    /// isn't in the list goes to the nearest one in that direction, or stays when there is none
+    /// (8 never grows from Smaller Text, 96 never shrinks from Bigger Text).
     static func size(_ size: Double, steppedBy step: Int) -> Double {
-        let index = sizes.firstIndex(of: size)
-            ?? (step > 0 ? sizes.lastIndex(where: { $0 < size }) : sizes.firstIndex(where: { $0 > size }))
-            ?? sizes.firstIndex(of: defaultSize) ?? 0
-        return sizes[min(max(index + step, 0), sizes.count - 1)]
+        if let index = sizes.firstIndex(of: size) {
+            return sizes[min(max(index + step, 0), sizes.count - 1)]
+        }
+        if step > 0 { return sizes.first(where: { $0 > size }) ?? size }
+        if step < 0 { return sizes.last(where: { $0 < size }) ?? size }
+        return size
     }
 }
 

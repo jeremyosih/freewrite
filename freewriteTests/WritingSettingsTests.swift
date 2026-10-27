@@ -43,6 +43,11 @@ struct WritingSettingsTests {
         #expect(WritingFont.size(26, steppedBy: 1) == 26)
         #expect(WritingFont.size(19, steppedBy: 1) == 20)
         #expect(WritingFont.size(19, steppedBy: -1) == 18)
+        // Custom sizes outside the presets move toward them, never the other way.
+        #expect(WritingFont.size(8, steppedBy: -1) == 8)
+        #expect(WritingFont.size(8, steppedBy: 1) == 16)
+        #expect(WritingFont.size(96, steppedBy: 1) == 96)
+        #expect(WritingFont.size(96, steppedBy: -1) == 26)
     }
 }
 

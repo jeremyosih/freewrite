@@ -1182,7 +1182,7 @@ struct ContentView: View {
             return
         }
         templateMenu.editTemplatesHandler = { openTemplateSettings() }
-        templateMenu.didInsertHandler = { applyTemplateWriting($0) }
+        templateMenu.didInsertHandler = { applyTemplateWriting($0, undoManager: $1) }
         // After the palette (if it was open) has given the editor its focus back.
         DispatchQueue.main.async {
             if !templateMenu.openAtCaret() {
@@ -2312,7 +2312,7 @@ struct ContentView: View {
         .onAppear {
             WritingWindow.openCount += 1
             templateMenu.editTemplatesHandler = { openTemplateSettings() }
-        templateMenu.didInsertHandler = { applyTemplateWriting($0) }
+        templateMenu.didInsertHandler = { applyTemplateWriting($0, undoManager: $1) }
             installTimerScrollMonitor()
             showingSidebar = false  // Hide sidebar by default
             timeRemaining = sessionMinutes * 60
@@ -2554,9 +2554,24 @@ struct ContentView: View {
     }
 
     /// A template with a font/size switches the page to it once it's inserted.
-    private func applyTemplateWriting(_ template: WritingTemplate) {
-        guard let writing = template.writing else { return }
+    /// Undo of the insertion (one group, same event) also puts the page's previous font/size back.
+    private func applyTemplateWriting(_ template: WritingTemplate, undoManager: UndoManager?) {
+        guard let writing = template.writing, let entryId = selectedEntryId else { return }
+        let previous = pageWriting ?? WritingSettings()
         updatePageWriting { $0 = $0.overlaid(with: writing) }
+        let applied = pageWriting ?? WritingSettings()
+        guard applied != previous, let undoManager else { return }
+        registerPageWritingUndo(undoManager, entryId: entryId, restoring: previous, redoing: applied)
+    }
+
+    private func registerPageWritingUndo(_ undoManager: UndoManager, entryId: UUID,
+                                         restoring old: WritingSettings, redoing new: WritingSettings) {
+        undoManager.registerUndo(withTarget: undoManager) { undoManager in
+            // The editor's undo stack is cleared when another page loads; this is a safety net.
+            guard selectedEntryId == entryId else { return }
+            updatePageWriting { $0 = old }
+            registerPageWritingUndo(undoManager, entryId: entryId, restoring: new, redoing: old)
+        }
     }
 
     /// "18px" (bottom bar item): click for the next size.

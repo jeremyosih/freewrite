@@ -40,7 +40,7 @@ final class TemplateMenuController {
     /// Set by the editor: opens the menu at the caret (Insert Template…). False when it can't.
     @ObservationIgnored var openAtCaretHandler: (() -> Bool)?
     /// Set by ContentView: called after a template went into the text (applies its font/size).
-    @ObservationIgnored var didInsertHandler: ((WritingTemplate) -> Void)?
+    @ObservationIgnored var didInsertHandler: ((WritingTemplate, UndoManager?) -> Void)?
     /// Set by ContentView: "Edit Templates…" opens Settings › Templates.
     @ObservationIgnored var editTemplatesHandler: (() -> Void)?
 
