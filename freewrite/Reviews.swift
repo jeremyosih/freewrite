@@ -49,8 +49,10 @@ enum ReviewProvider: String, CaseIterable, Identifiable, Sendable {
 
 /// Keychain credentials for PiDurableKit, one generic password per provider. Uses the
 /// data-protection keychain like `KeychainCredentialStore`; builds without a team ID (ad-hoc
-/// signed dev builds) get errSecMissingEntitlement (-34018) there, so they fall back to the
-/// classic login keychain, which only needs the app's own signature.
+/// signed dev builds) get errSecMissingEntitlement (-34018) when writing there, so they fall back
+/// to the classic login keychain, which only needs the app's own signature. Reads don't fail the
+/// same way (the data-protection keychain just reports "not found"), so every read, listing and
+/// removal looks in both keychains; otherwise a key or sign-in saved by the fallback is never seen.
 struct FreewriteCredentialStore: CredentialStore {
     let service: String
 
@@ -74,27 +76,45 @@ struct FreewriteCredentialStore: CredentialStore {
         }
     }
 
+    /// `body` on the data-protection keychain (skipped when this build can't use it), then on the login keychain.
+    private func inBothKeychains<T>(_ body: (Bool) throws -> T) throws -> [T] {
+        var results: [T] = []
+        do {
+            results.append(try body(true))
+        } catch let error as CredentialKeychainError where error.status == errSecMissingEntitlement {}
+        results.append(try body(false))
+        return results
+    }
+
+    private func read(_ provider: ProviderID, dataProtection: Bool) throws -> Credential? {
+        var query = query(provider, dataProtection: dataProtection)
+        query[kSecReturnData] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data else { throw CredentialKeychainError(status: status) }
+        return try JSONDecoder().decode(Credential.self, from: data)
+    }
+
     func credential(for provider: ProviderID) throws -> Credential? {
-        try withKeychain { dataProtection in
-            var query = query(provider, dataProtection: dataProtection)
-            query[kSecReturnData] = true
-            query[kSecMatchLimit] = kSecMatchLimitOne
-            var result: CFTypeRef?
-            let status = SecItemCopyMatching(query as CFDictionary, &result)
-            if status == errSecItemNotFound { return nil }
-            guard status == errSecSuccess, let data = result as? Data else { throw CredentialKeychainError(status: status) }
-            return try JSONDecoder().decode(Credential.self, from: data)
-        }
+        do {
+            if let credential = try read(provider, dataProtection: true) { return credential }
+        } catch let error as CredentialKeychainError where error.status == errSecMissingEntitlement {}
+        return try read(provider, dataProtection: false)
     }
 
     func setCredential(_ credential: Credential?, for provider: ProviderID) throws {
-        try withKeychain { dataProtection in
-            let base = query(provider, dataProtection: dataProtection)
-            guard let credential else {
-                let status = SecItemDelete(base as CFDictionary)
+        guard let credential else {
+            // Signing out removes the credential wherever it was saved.
+            _ = try inBothKeychains { dataProtection in
+                let status = SecItemDelete(query(provider, dataProtection: dataProtection) as CFDictionary)
                 guard status == errSecSuccess || status == errSecItemNotFound else { throw CredentialKeychainError(status: status) }
-                return
             }
+            return
+        }
+        let savedWithDataProtection = try withKeychain { dataProtection in
+            let base = query(provider, dataProtection: dataProtection)
             var attributes: [CFString: Any] = [kSecValueData: try JSONEncoder().encode(credential)]
             if dataProtection { attributes[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly }
             var status = SecItemUpdate(base as CFDictionary, attributes as CFDictionary)
@@ -102,11 +122,16 @@ struct FreewriteCredentialStore: CredentialStore {
                 status = SecItemAdd(base.merging(attributes) { _, new in new } as CFDictionary, nil)
             }
             guard status == errSecSuccess else { throw CredentialKeychainError(status: status) }
+            return dataProtection
+        }
+        if savedWithDataProtection {
+            // A copy left in the login keychain by an earlier build would be stale.
+            SecItemDelete(query(provider, dataProtection: false) as CFDictionary)
         }
     }
 
     func providers() throws -> [ProviderID] {
-        try withKeychain { dataProtection in
+        let lists = try inBothKeychains { dataProtection -> [ProviderID] in
             var query = query(nil, dataProtection: dataProtection)
             query[kSecReturnAttributes] = true
             query[kSecMatchLimit] = kSecMatchLimitAll
@@ -116,6 +141,8 @@ struct FreewriteCredentialStore: CredentialStore {
             guard status == errSecSuccess, let items = result as? [[CFString: Any]] else { throw CredentialKeychainError(status: status) }
             return items.compactMap { ($0[kSecAttrAccount] as? String).map(ProviderID.init(rawValue:)) }
         }
+        var seen = Set<ProviderID>()
+        return lists.flatMap { $0 }.filter { seen.insert($0).inserted }
     }
 
     /// A Keychain failure in words a user can act on.
@@ -582,6 +609,11 @@ final class ReviewService: ObservableObject {
 
     func saveAPIKey(_ key: String, for provider: ReviewProvider) async throws {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        // `claude setup-token` makes a Claude subscription token (sk-ant-oat…). Anthropic only allows
+        // those in Claude Code and its own apps; other apps must use a Console API key.
+        if provider == .anthropic, trimmed.hasPrefix("sk-ant-oat") {
+            throw ReviewError.failed("That's a Claude subscription token (from claude setup-token). Anthropic only allows those in Claude Code, so Freewrite needs an API key from the Claude Console (sk-ant-api…).")
+        }
         do {
             try await credentials.setCredential(trimmed.isEmpty ? nil : .apiKey(trimmed), for: provider.providerID)
         } catch {
