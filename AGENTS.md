@@ -73,6 +73,7 @@ freewrite/
 │   ├── VideoRecordingView.swift  # Video recording interface
 │   ├── VideoPlayerView.swift     # Video playback interface
 │   ├── SettingsView.swift        # Settings window (⌘,), stored settings keys, shortcuts + menu commands
+│   ├── Transcription.swift       # Transcription engines: Apple (live, on-device) or Hex local API client
 │   └── freewrite.entitlements    # App permissions
 ├── CLAUDE.md                     # This file
 └── AGENTS.md                     # Duplicate of this file
@@ -632,6 +633,13 @@ Key details:
 - Final transcript formatting is applied at stop to improve readability before saving/copying.
 - Video playback nav exposes `Copy Transcript` for saved video entries with a transcript file.
 - App sandbox requires `com.apple.security.personal-information.speech-recognition` entitlement plus `NSSpeechRecognitionUsageDescription`.
+
+### Transcription Engines (`Transcription.swift`)
+
+Settings › Transcription picks the engine (`UserDefaults["transcriptionEngine"]`):
+- **Apple (default)**: the live `SFSpeechRecognizer` pipeline above, on-device when supported. Speech permission is required to record.
+- **Hex**: after the recording is saved, `HexTranscriber` decodes the audio to 16 kHz mono, cuts it into ~30 s pieces at quiet points, and POSTs WAV to the running Hex app's local API v2 (`/transcriptions?model=&language=`). Discovery file: `~/Library/Application Support/hex/local-api.json` (or legacy `voice-control/`), holding port + bearer token (never logged). Speech permission is optional; if already granted, Apple's live transcript is saved first and replaced when Hex finishes. Failures show briefly in the video bottom bar.
+- Sandbox: Hex needs `com.apple.security.network.client` plus a read-only home-relative temporary exception for Hex's Application Support folders (fine for direct distribution; the Mac App Store would reject the temporary exception).
 
 ### Video Thumbnail Generation Nuances
 

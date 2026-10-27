@@ -43,6 +43,8 @@ final class CameraManager: NSObject, ObservableObject, @unchecked Sendable {
     private let captionPauseCommitDelaySeconds: Double = 1.2
     private var pendingTranscriptForCompletion: String = ""
 
+    /// False when another engine (Hex) transcribes the saved file, so speech permission is optional.
+    var requiresSpeechRecognition = true
     var onRecordingComplete: ((URL, String) -> Void)?
     var onReadyToRecord: (() -> Void)?
     var onCannotRecord: (() -> Void)?
@@ -69,7 +71,7 @@ final class CameraManager: NSObject, ObservableObject, @unchecked Sendable {
         logPermissionState("checkPermissions() start")
         hasNotifiedReady = false
         hasNotifiedCannotRecord = false
-        requestSpeechPermissionIfNeeded { [weak self] in
+        requestSpeechPermissionIfRequired { [weak self] in
             guard let self else { return }
             self.requestCameraPermissionIfNeeded { [weak self] in
                 guard let self else { return }
@@ -78,6 +80,18 @@ final class CameraManager: NSObject, ObservableObject, @unchecked Sendable {
                 }
             }
         }
+    }
+
+    private func requestSpeechPermissionIfRequired(completion: @escaping @Sendable () -> Void) {
+        guard requiresSpeechRecognition else {
+            // Another engine transcribes the file. Use Apple's live transcript as a fallback only
+            // if it's already allowed; never prompt for it.
+            speechPermissionGranted = SFSpeechRecognizer.authorizationStatus() == .authorized
+            refreshLiveCaptionState()
+            completion()
+            return
+        }
+        requestSpeechPermissionIfNeeded(completion: completion)
     }
 
     private func requestSpeechPermissionIfNeeded(completion: @escaping @Sendable () -> Void) {
@@ -144,7 +158,7 @@ final class CameraManager: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     private func evaluateCapturePermissionsAndSetup() {
-        if permissionGranted && microphonePermissionGranted && speechPermissionGranted {
+        if permissionGranted && microphonePermissionGranted && hasRequiredSpeechPermission {
             setupCamera()
             return
         }
@@ -155,7 +169,7 @@ final class CameraManager: NSObject, ObservableObject, @unchecked Sendable {
         if !microphonePermissionGranted {
             print("[CameraManager] microphone access unavailable; recording is blocked until enabled in System Settings.")
         }
-        if !speechPermissionGranted {
+        if !hasRequiredSpeechPermission {
             print("[CameraManager] speech recognition access unavailable; recording is blocked until enabled in System Settings.")
         }
 
@@ -253,8 +267,12 @@ final class CameraManager: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
+    var hasRequiredSpeechPermission: Bool {
+        speechPermissionGranted || !requiresSpeechRecognition
+    }
+
     private func notifyReadyIfPossible() {
-        guard permissionGranted, microphonePermissionGranted, speechPermissionGranted, previewLayer != nil else { return }
+        guard permissionGranted, microphonePermissionGranted, hasRequiredSpeechPermission, previewLayer != nil else { return }
         notifyReadyIfNeeded()
     }
 
@@ -672,7 +690,7 @@ struct VideoRecordingView: View {
     var canRecord: Bool {
         cameraManager.permissionGranted &&
         cameraManager.microphonePermissionGranted &&
-        cameraManager.speechPermissionGranted
+        cameraManager.hasRequiredSpeechPermission
     }
 
     var displayTimer: String {

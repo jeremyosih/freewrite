@@ -126,6 +126,8 @@ struct ContentView: View {
     @State private var didCopyPrompt: Bool = false // Add state for copy prompt feedback
     @State private var didCopyTranscript: Bool = false
     @State private var selectedVideoHasTranscript = false
+    /// Hex progress or failure per video entry; only the selected entry's is shown.
+    @State private var transcriptionStatuses: [UUID: String] = [:]
     @State private var backspaceDisabled = false // Add state for backspace toggle
     @State private var isHoveringBackspaceToggle = false // Add state for backspace toggle hover
     @State private var showingVideoRecording = false // Add state for video recording view
@@ -705,6 +707,7 @@ struct ContentView: View {
 
         let preparationID = UUID()
         let manager = CameraManager()
+        manager.requiresSpeechRecognition = TranscriptionEngine.current == .apple
 
         videoRecordingPreparationID = preparationID
         preparedCameraManager = manager
@@ -735,7 +738,7 @@ struct ContentView: View {
                 let payload = self.videoPermissionPopoverPayload(
                     cameraGranted: manager.permissionGranted,
                     microphoneGranted: manager.microphonePermissionGranted,
-                    speechGranted: manager.speechPermissionGranted
+                    speechGranted: manager.hasRequiredSpeechPermission
                 )
                 self.videoPermissionPopoverItems = payload.items
                 self.videoPermissionPopoverFallbackMessage = payload.fallbackMessage
@@ -948,6 +951,11 @@ struct ContentView: View {
                     HStack {
                         if isViewingVideoEntry {
                             HStack(spacing: 8) {
+                                if let transcriptionStatus = selectedEntryId.flatMap({ transcriptionStatuses[$0] }) {
+                                    Text(transcriptionStatus)
+                                        .font(.system(size: 13))
+                                        .foregroundColor(textColor)
+                                }
                                 if selectedVideoHasTranscript {
                                     Button(action: {
                                         copyTranscriptForSelectedVideoEntry()
@@ -1922,6 +1930,10 @@ struct ContentView: View {
                     }
                 }
 
+                if TranscriptionEngine.current == .hex {
+                    transcribeWithHex(videoURL: videoDestURL, transcriptURL: transcriptURL, entryId: videoEntry.id)
+                }
+
                 if replacementEntry != nil {
                     print("Successfully replaced empty text entry with video entry")
                 } else {
@@ -1929,6 +1941,36 @@ struct ContentView: View {
                 }
             } catch {
                 print("Error saving video entry: \(error)")
+            }
+        }
+    }
+
+    /// Replaces the saved transcript with Hex's once it finishes. On failure the live Apple
+    /// transcript (if any) stays, and the reason shows briefly in the bottom bar.
+    private func transcribeWithHex(videoURL: URL, transcriptURL: URL, entryId: UUID) {
+        transcriptionStatuses[entryId] = "Transcribing with Hex…"
+        Task {
+            do {
+                let transcript = try await HexTranscriber.transcribe(mediaURL: videoURL)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !transcript.isEmpty {
+                    try transcript.write(to: transcriptURL, atomically: true, encoding: .utf8)
+                    if let index = entries.firstIndex(where: { $0.id == entryId }) {
+                        entries[index].previewText = previewTextFromTranscript(transcript)
+                    }
+                    if selectedEntryId == entryId {
+                        selectedVideoHasTranscript = true
+                        didCopyTranscript = false
+                    }
+                }
+                transcriptionStatuses[entryId] = nil
+            } catch {
+                let message = "Hex: \(error.localizedDescription)"
+                transcriptionStatuses[entryId] = message
+                try? await Task.sleep(for: .seconds(6))
+                if transcriptionStatuses[entryId] == message {
+                    transcriptionStatuses[entryId] = nil
+                }
             }
         }
     }
