@@ -12,5 +12,12 @@
     <true/>
     <key>com.apple.security.personal-information.speech-recognition</key>
     <true/>
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
+    <array>
+        <string>/Library/Application Support/hex/</string>
+        <string>/Library/Application Support/voice-control/</string>
+    </array>
 </dict>
 </plist>

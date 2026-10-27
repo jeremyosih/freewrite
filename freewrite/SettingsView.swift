@@ -264,6 +264,8 @@ struct SettingsView: View {
         TabView {
             WritingSettingsView()
                 .tabItem { Label("Writing", systemImage: "textformat") }
+            TranscriptionSettingsView()
+                .tabItem { Label("Transcription", systemImage: "waveform") }
             ShortcutSettingsView()
                 .tabItem { Label("Shortcuts", systemImage: "keyboard") }
         }
@@ -337,6 +339,96 @@ private struct WritingSettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+private struct TranscriptionSettingsView: View {
+    @AppStorage(SettingsKey.transcriptionEngine) private var engine = TranscriptionEngine.apple.rawValue
+    @AppStorage(SettingsKey.hexModel) private var hexModel = ""
+    @AppStorage(SettingsKey.hexLanguage) private var hexLanguage = "en"
+
+    private enum HexStatus: Equatable {
+        case checking
+        case connected(version: String, models: [HexClient.Model])
+        case unavailable(String)
+    }
+
+    @State private var hexStatus: HexStatus = .checking
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("Engine", selection: $engine) {
+                    ForEach(TranscriptionEngine.allCases) { engine in
+                        Text(engine.title).tag(engine.rawValue)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+            } footer: {
+                Text(engine == TranscriptionEngine.hex.rawValue
+                     ? "Video entries are transcribed by Hex after you stop recording. If Hex isn't running, Apple's on-device transcript is kept when available."
+                     : "Video entries are transcribed live on this Mac with Apple's speech recognition.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if engine == TranscriptionEngine.hex.rawValue {
+                Section("Hex") {
+                    LabeledContent("Status") {
+                        HStack {
+                            switch hexStatus {
+                            case .checking:
+                                ProgressView().controlSize(.small)
+                            case .connected(let version, _):
+                                Label("Connected · \(version)", systemImage: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                                    .fixedSize()
+                            case .unavailable(let reason):
+                                Label(reason, systemImage: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                    .lineLimit(2)
+                            }
+                            Button("Refresh") { Task { await refreshHex() } }
+                        }
+                    }
+
+                    Picker("Model", selection: $hexModel) {
+                        Text("Automatic").tag("")
+                        ForEach(usableModels) { model in
+                            Text(model.displayName).tag(model.id)
+                        }
+                        if !hexModel.isEmpty && !usableModels.contains(where: { $0.id == hexModel }) {
+                            Text(hexModel).tag(hexModel)
+                        }
+                    }
+
+                    TextField("Language", text: $hexLanguage, prompt: Text("en"))
+
+                    if case .unavailable = hexStatus {
+                        Link("Get Hex", destination: URL(string: "https://hex.kitlangton.com")!)
+                    }
+                }
+                .task { await refreshHex() }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private var usableModels: [HexClient.Model] {
+        if case .connected(_, let models) = hexStatus {
+            return models.filter(\.usable)
+        }
+        return []
+    }
+
+    private func refreshHex() async {
+        hexStatus = .checking
+        do {
+            let client = try await HexClient.connect()
+            hexStatus = .connected(version: try await client.health(), models: try await client.models())
+        } catch {
+            hexStatus = .unavailable(error.localizedDescription)
+        }
     }
 }
 
