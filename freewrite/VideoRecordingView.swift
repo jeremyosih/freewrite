@@ -839,17 +839,23 @@ struct VideoRecordingView: View {
 
 }
 
-// Helper function to generate a thumbnail from a video
+// Helper function to generate a thumbnail from a video.
+// Callers are synchronous (sidebar rows, save path), so this waits on the async generator,
+// which blocks exactly as long as the deprecated copyCGImage(at:actualTime:) used to.
 func generateVideoThumbnail(from url: URL, at time: CMTime = CMTime(seconds: 0, preferredTimescale: 1)) -> NSImage? {
-    let asset = AVAsset(url: url)
-    let imageGenerator = AVAssetImageGenerator(asset: asset)
+    let imageGenerator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
     imageGenerator.appliesPreferredTrackTransform = true
 
-    do {
-        let cgImage = try imageGenerator.copyCGImage(at: time, actualTime: nil)
-        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-    } catch {
-        print("Error generating thumbnail: \(error)")
-        return nil
+    let semaphore = DispatchSemaphore(value: 0)
+    nonisolated(unsafe) var result: NSImage?
+    imageGenerator.generateCGImageAsynchronously(for: time) { cgImage, _, error in
+        if let cgImage {
+            result = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        } else if let error {
+            print("Error generating thumbnail: \(error)")
+        }
+        semaphore.signal()
     }
+    semaphore.wait()
+    return result
 }
