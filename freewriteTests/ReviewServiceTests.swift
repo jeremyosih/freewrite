@@ -66,8 +66,8 @@ struct ReviewServiceTests {
         let saved = try AnnotationStore(versionStore: versions).load(for: entry)
         #expect(saved.count == 1)
         let note = try #require(saved.first)
-        #expect(note.anchor.quote == "I keep avoiding it")
-        #expect(note.anchor.start == 8 && note.anchor.end == 26)
+        #expect(note.anchor?.quote == "I keep avoiding it")
+        #expect(note.anchor?.start == 8 && note.anchor?.end == 26)
         #expect(note.versionId == "v1")
         #expect(note.reviewerId == "mirror")
         #expect(note.entryId == entryId.uuidString)
@@ -80,6 +80,53 @@ struct ReviewServiceTests {
         _ = try await service.review(entryFilename: entry, entryId: entryId, versionId: "v1", profile: profile)
         #expect(try AnnotationStore(versionStore: versions).load(for: entry).count == 1)
         await service.close()
+    }
+
+    @Test func reReviewResolvesAnOldNoteAndAddsAPageNote() async throws {
+        let root = try makeFolder("entries")
+        let versions = try writeEntry("Monday. I keep avoding it.", in: root)
+        let faux = FauxProvider()
+        let service = try makeService(root: root, faux: faux)
+        _ = try await service.models()
+        try await faux.append(.toolCall("add_annotation", ["quote": "avoding", "comment": "Typo: avoiding.", "kind": "grammar"]))
+        try await faux.append(.toolCall("finish_review", ["summary": "One typo."]))
+        let first = try await service.review(entryFilename: entry, entryId: entryId, versionId: "v1", profile: profile)
+        #expect(first.added == 1 && first.resolved == 0)
+        let typo = try #require(try AnnotationStore(versionStore: versions).load(for: entry).first)
+
+        // The writer fixes it; the next review sees the old note in its brief and resolves it.
+        try "Monday. I keep avoiding it.".write(to: versions.entryFileURL(for: entry), atomically: true, encoding: .utf8)
+        let briefs = Briefs()
+        let calls = Calls()
+        try await faux.respond { messages, _ in
+            await calls.increment()
+            let count = await calls.count
+            if count == 1 { await briefs.record("\(messages)") }
+            switch count {
+            case 1: return FauxResponse(.toolCall("resolve_annotation", ["id": .string(typo.id), "reason": "fixed"]))
+            case 2: return FauxResponse(.toolCall("add_page_note", ["comment": "Say what \"it\" is next time.", "kind": "question"]))
+            default: return FauxResponse(.toolCall("finish_review", ["summary": "Typo fixed."]))
+            }
+        }
+        let second = try await service.review(entryFilename: entry, entryId: entryId, versionId: "v1", profile: profile)
+        #expect(second.added == 1 && second.resolved == 1)
+        #expect(await briefs.text.contains(typo.id))
+
+        let saved = try AnnotationStore(versionStore: versions).load(for: entry)
+        #expect(saved.count == 2)
+        let resolved = try #require(saved.first { $0.id == typo.id })
+        #expect(resolved.status == .resolved)
+        #expect(resolved.resolution?.by == .reviewer && resolved.resolution?.reason == "fixed")
+        #expect(resolved.resolution?.runId == "review:\(entryId.uuidString):v1:mirror:2")
+        let page = try #require(saved.first { $0.isPageNote })
+        #expect(page.kind == "question" && page.status == .active && page.versionId == "v1")
+        await service.close()
+    }
+
+    /// The text of the first request the faux model saw.
+    private actor Briefs {
+        var text = ""
+        func record(_ text: String) { self.text = text }
     }
 
     @Test func modelErrorsSurfaceAsReviewErrors() async throws {

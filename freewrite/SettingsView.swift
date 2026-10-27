@@ -18,6 +18,7 @@ enum SettingsKey {
     static let sessionMinutes = "sessionMinutes"
     static let shortcuts = "shortcuts"
     static let storageBookmark = "storageFolderBookmark"
+    static let showComments = "showComments"
 }
 
 // MARK: - Shortcuts
@@ -43,6 +44,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
     case insertTemplate
     case newReviewerByChat
     case toggleFocusMode
+    case toggleComments
 
     var id: String { rawValue }
 
@@ -68,6 +70,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .insertTemplate: return "Insert Template…"
         case .newReviewerByChat: return "New Reviewer by Chat…"
         case .toggleFocusMode: return "Focus Mode"
+        case .toggleComments: return "Show/Hide Comments"
         }
     }
 
@@ -88,6 +91,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .decreaseFontSize: return KeyShortcut(key: "-", modifiers: [.command])
         case .showWelcomeEntry, .insertTemplate, .chooseFont, .randomFont, .useDefaultFont, .newReviewerByChat: return nil
         case .toggleFocusMode: return KeyShortcut(key: "f", modifiers: [.command, .shift])
+        case .toggleComments: return KeyShortcut(key: "m", modifiers: [.command, .shift])
         }
     }
 
@@ -278,6 +282,7 @@ struct FreewriteCommands: Commands {
         }
         CommandGroup(after: .sidebar) {
             button(for: .toggleHistory)
+            button(for: .toggleComments)
             button(for: .toggleFocusMode)
             button(for: .toggleTheme)
         }

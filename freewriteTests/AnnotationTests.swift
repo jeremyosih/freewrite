@@ -65,10 +65,10 @@ struct AnnotationAnchoringTests {
         #expect(orphaned[0].status == .orphaned)
         let revived = AnnotationAnchoring.reanchor(orphaned, versionId: "v1", in: "Alpha, beta!")
         #expect(revived[0].status == .active)
-        #expect(revived[0].anchor.start == 7)
+        #expect(revived[0].anchor?.start == 7)
         // Other versions and dismissed notes are left alone.
-        let dismissed = annotation(note.anchor, status: .dismissed)
-        let other = annotation(note.anchor, version: "v2")
+        let dismissed = annotation(try #require(note.anchor), status: .dismissed)
+        let other = annotation(try #require(note.anchor), version: "v2")
         let untouched = AnnotationAnchoring.reanchor([dismissed, other], versionId: "v1", in: "nothing")
         #expect(untouched == [dismissed, other])
     }
@@ -76,16 +76,77 @@ struct AnnotationAnchoringTests {
     @Test func followEditKeepsTheRightRepeat() throws {
         let text = "tired. tired. tired."
         let middle = annotation(try anchor("tired", prefix: "tired. ", suffix: ". tired", in: text))
-        #expect(middle.anchor.start == 7)
+        #expect(middle.anchor?.start == 7)
         let typed = "So tired. tired. tired."
         let moved = AnnotationAnchoring.followEdit([middle], versionId: "v1", from: text, to: typed)
-        #expect(moved[0].anchor.start == 10)
+        #expect(moved[0].anchor?.start == 10)
         #expect(moved[0].status == .active)
         // Typing inside the quote changes it: no longer found there, nor anywhere else verbatim → the
         // nearest remaining "tired" with matching context wins, which is still a valid anchor.
         let broken = AnnotationAnchoring.followEdit([middle], versionId: "v1", from: text, to: "tired. tir-ed. tired.")
         #expect(broken[0].status == .active)
-        #expect(broken[0].anchor.start != 7)
+        #expect(broken[0].anchor?.start != 7)
+    }
+
+    @Test func resolvedNotesKeepTheirStatusAndFollowTheText() throws {
+        let text = "Alpha beta gamma."
+        var note = annotation(try anchor("beta", in: text))
+        note.resolve(.init(by: .user, at: Date(timeIntervalSince1970: 1)))
+        let moved = AnnotationAnchoring.followEdit([note], versionId: "v1", from: text, to: "Oh. " + text)
+        #expect(moved[0].status == .resolved)
+        #expect(moved[0].anchor?.start == 10)
+        // Its quote gone, a resolved note stays resolved (it isn't orphaned).
+        #expect(AnnotationAnchoring.reanchor([note], versionId: "v1", in: "Alpha gamma.")[0].status == .resolved)
+        // Page notes have nothing to anchor.
+        let page = Annotation(id: "P", entryId: "E", versionId: "v1", reviewerId: "mirror", runId: "r",
+                              anchor: nil, comment: "c", kind: "insight", status: .active, createdAt: Date())
+        #expect(AnnotationAnchoring.reanchor([page], versionId: "v1", in: "") == [page])
+        #expect(AnnotationAnchoring.followEdit([page], versionId: "v1", from: "a", to: "ab") == [page])
+    }
+
+    @Test func statusTransitions() throws {
+        var note = annotation(try anchor("beta", in: "Alpha beta."))
+        // Applies a status change to `note`, returning whether it changed anything.
+        func change(_ body: (inout Annotation) -> Bool) -> Bool { body(&note) }
+        let byUser = Annotation.Resolution(by: .user, at: Date(timeIntervalSince1970: 5))
+        #expect(change { $0.resolve(byUser) })
+        #expect(note.status == .resolved && note.resolution == byUser)
+        #expect(!change { $0.resolve(byUser) })  // already resolved
+        #expect(change { $0.reopen() })
+        #expect(note.status == .active && note.resolution == nil)
+        #expect(!change { $0.reopen() })  // only resolved notes reopen
+        note.status = .orphaned
+        #expect(change { $0.resolve(byUser) })  // an orphan can be resolved
+        #expect(change { $0.dismiss() })
+        #expect(!change { $0.dismiss() })
+        #expect(!change { $0.resolve(byUser) })  // dismissed notes stay dismissed
+        #expect(!note.isOpen)
+    }
+
+    @Test func mergingMovedAnchorsKeepsStatusesSetMeanwhile() throws {
+        let text = "Alpha beta gamma."
+        let typed = annotation(try anchor("beta", in: text))
+        var moved = typed
+        moved.anchor?.start = 9
+        moved.anchor?.end = 13
+        // A review resolved the note while the editor's moved anchors were waiting to be saved.
+        var stored = [typed]
+        stored[0].resolve(.init(by: .reviewer, reviewerId: "mirror", runId: "r2", reason: "fixed", at: Date()))
+        AnnotationAnchoring.mergeAnchors([moved], into: &stored)
+        #expect(stored[0].status == .resolved)
+        #expect(stored[0].anchor?.start == 9)
+        // Open notes take the editor's status (orphaned while its quote is gone).
+        var orphan = moved
+        orphan.status = .orphaned
+        var open = [typed]
+        AnnotationAnchoring.mergeAnchors([orphan], into: &open)
+        #expect(open[0].status == .orphaned)
+        // Dismissed notes aren't touched at all.
+        var dismissed = [typed]
+        dismissed[0].dismiss()
+        let before = dismissed
+        AnnotationAnchoring.mergeAnchors([moved], into: &dismissed)
+        #expect(dismissed == before)
     }
 
     @Test func editRangeMatchesTextStorage() throws {
@@ -134,6 +195,40 @@ struct AnnotationStoreTests {
         #expect(!FileManager.default.fileExists(atPath: url.path))
     }
 
+    @Test func olderFilesDecodeAndPageNotesRoundTrip() throws {
+        let store = try makeStore()
+        let url = store.fileURL(for: entry)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // Written before resolve and page notes existed, plus a status from some future version.
+        let old = """
+        [{"id":"A1","entryId":"E","versionId":"v1","reviewerId":"coach","runId":"r",
+          "anchor":{"quote":"Text","prefix":"","suffix":".","start":0,"end":4},
+          "comment":"Hi.","kind":"observation","status":"dismissed","createdAt":"2026-02-20T08:00:00Z"},
+         {"id":"A2","entryId":"E","versionId":"v1","reviewerId":"coach","runId":"r",
+          "anchor":{"quote":"Text","prefix":"","suffix":".","start":0,"end":4},
+          "comment":"Later.","status":"snoozed","createdAt":"2026-02-20T08:00:00Z"}]
+        """
+        try old.write(to: url, atomically: true, encoding: .utf8)
+        let loaded = try store.load(for: entry)
+        #expect(loaded.map(\.status) == [.dismissed, .active])
+        #expect(loaded[1].kind == "insight")
+        #expect(loaded.allSatisfy { $0.resolution == nil && !$0.isPageNote })
+
+        var page = Annotation(id: "P1", entryId: "E", versionId: "v1", reviewerId: "coach", runId: "r2",
+                              anchor: nil, comment: "The ending lands.", kind: "praise", status: .active,
+                              createdAt: Date(timeIntervalSince1970: 1_800_000_000))
+        page.resolve(.init(by: .reviewer, reviewerId: "coach", runId: "r3", reason: "kept in v2", at: Date(timeIntervalSince1970: 1_800_000_100)))
+        try store.save([page], for: entry)
+        #expect(try store.load(for: entry) == [page])
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [[String: Any]])
+        #expect(json[0]["anchor"] == nil)
+        #expect(json[0]["status"] as? String == "resolved")
+        let resolution = try #require(json[0]["resolution"] as? [String: Any])
+        #expect(resolution["by"] as? String == "reviewer")
+        #expect(resolution["reason"] as? String == "kept in v2")
+        #expect(resolution["at"] as? String == "2027-01-15T08:01:40Z")
+    }
+
     @Test func corruptFileIsNotOverwritten() throws {
         let store = try makeStore()
         let url = store.fileURL(for: entry)
@@ -151,6 +246,11 @@ struct AnnotationStoreTests {
                               now: Date(timeIntervalSince1970: 200))
         #expect(store.latestSummary(versionId: "v1", entryFilename: entry) == "Second look.")
         #expect(store.latestSummary(versionId: "v2", entryFilename: entry) == nil)
+        try store.saveSummary("Shorter now.", reviewerName: "Line Editor", versionId: "v2", entryFilename: entry,
+                              now: Date(timeIntervalSince1970: 300))
+        let latest = store.latestReviews(entryFilename: entry)
+        #expect(latest["v2"] == .init(reviewerName: "Line Editor", summary: "Shorter now."))
+        #expect(latest["v1"]?.summary == "Second look.")
     }
 
     @Test func writesForAMissingEntryDontRecreateItsFolder() throws {
@@ -187,7 +287,7 @@ struct ReviewToolboxTests {
         _ = try toolbox.addAnnotation(new, id: "A1")  // replayed call
         let saved = try toolbox.annotations.load(for: entry)
         #expect(saved.count == 1)
-        #expect(saved[0].anchor.start == 7 && saved[0].anchor.end == 18)
+        #expect(saved[0].anchor?.start == 7 && saved[0].anchor?.end == 18)
         #expect(saved[0].runId == "review:E:v1:mirror:1")
 
         let missing = ReviewToolbox.NewAnnotation(quote: "never written", comment: "x")
@@ -207,6 +307,52 @@ struct ReviewToolboxTests {
         #expect(try mirror.annotations.load(for: entry).first?.comment == "Still yes.")
         _ = try mirror.removeAnnotation(id: "M1")
         #expect(try mirror.annotations.load(for: entry).isEmpty)
+    }
+
+    @Test func pageNotesNeedACommentAndAKnownVersion() throws {
+        let toolbox = try makeToolbox(text: "A page.")
+        let result = try toolbox.addPageNote(.init(comment: "Try writing the ending first.", kind: "question"), id: "P1")
+        #expect(result.contains("page note P1"))
+        _ = try toolbox.addPageNote(.init(comment: "Try writing the ending first."), id: "P1")  // replayed
+        let saved = try toolbox.annotations.load(for: entry)
+        #expect(saved.count == 1)
+        #expect(saved[0].isPageNote && saved[0].kind == "question" && saved[0].status == .active)
+        #expect(throws: ReviewToolFailure.self) { try toolbox.addPageNote(.init(comment: "  "), id: "P2") }
+        #expect(throws: ReviewToolFailure.self) { try toolbox.addPageNote(.init(versionId: "v7", comment: "x"), id: "P3") }
+        #expect(try toolbox.listAnnotations(versionId: nil).contains("page note"))
+    }
+
+    @Test func resolvingFollowsTheRules() throws {
+        let first = try makeToolbox(text: "I keep avoding it.")
+        _ = try first.addAnnotation(.init(quote: "avoding", comment: "Typo: avoiding.", kind: "grammar"), id: "M1")
+        _ = try first.addAnnotation(.init(quote: "I keep", comment: "Unwanted."), id: "M2")
+        try first.annotations.update(for: entry) { $0[1].dismiss() }
+        let coachRun = ReviewRunContext(entryFilename: entry, entryId: "E", versionId: "v1", reviewerId: "coach",
+                                        reviewerName: "Coach", runId: "review:E:v1:coach:1", scope: .latest)
+        let coach = ReviewToolbox(versionStore: first.versionStore, run: coachRun)
+        _ = try coach.addAnnotation(.init(quote: "it", comment: "Which it?"), id: "C1")
+
+        // Same run: notes it just added are removed, not resolved.
+        #expect(throws: ReviewToolFailure.self) { try first.resolveAnnotation(id: "M1", reason: "fixed") }
+
+        // A later run of the same reviewer.
+        var laterRun = first.run
+        laterRun.runId = "review:E:v1:mirror:2"
+        let later = ReviewToolbox(versionStore: first.versionStore, run: laterRun, now: { Date(timeIntervalSince1970: 42) })
+        let brief = later.brief()
+        #expect(brief.contains("<earlier_notes>") && brief.contains("M1") && brief.contains("C1"))
+        #expect(brief.contains("You have 1 open note(s) to check."))
+        #expect(throws: ReviewToolFailure.self) { try later.resolveAnnotation(id: "M1", reason: "  ") }
+        #expect(throws: ReviewToolFailure.self) { try later.resolveAnnotation(id: "C1", reason: "answered") }  // not theirs
+        #expect(throws: ReviewToolFailure.self) { try later.resolveAnnotation(id: "M2", reason: "x") }  // dismissed
+        #expect(throws: ReviewToolFailure.self) { try later.resolveAnnotation(id: "nope", reason: "x") }
+        #expect(try later.resolveAnnotation(id: "M1", reason: "fixed the typo") == "Resolved M1.")
+        #expect(try later.resolveAnnotation(id: "M1", reason: "again") == "M1 is already resolved.")
+        let note = try #require(try later.annotations.load(for: entry).first { $0.id == "M1" })
+        #expect(note.status == .resolved)
+        #expect(note.resolution == .init(by: .reviewer, reviewerId: "mirror", runId: "review:E:v1:mirror:2",
+                                          reason: "fixed the typo", at: Date(timeIntervalSince1970: 42)))
+        #expect(try later.listAnnotations(versionId: "v1").contains("resolved by reviewer mirror: fixed the typo"))
     }
 
     @Test func readVersionSlicesAndDiffShowsChanges() throws {
