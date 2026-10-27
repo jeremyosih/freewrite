@@ -75,6 +75,8 @@ freewrite/
 │   ├── SettingsView.swift        # Settings window (⌘,), stored settings keys, shortcuts + menu commands
 │   ├── Transcription.swift       # Transcription engines: Apple (live, on-device) or Hex local API client
 │   ├── CommandPalette.swift      # ⌘K palette: full-text entry search + actions
+│   ├── WritingEditor.swift       # TextKit 2 NSTextView editor: markdown styling, highlights + hover comments
+│   ├── MarkdownStyling.swift     # Pure logic: markdown span ranges, EditorHighlight + range adjustment
 │   └── freewrite.entitlements    # App permissions
 ├── CLAUDE.md                     # This file
 └── AGENTS.md                     # Duplicate of this file
@@ -295,7 +297,7 @@ Bottom-bar controls, the editor and history rows carry `accessibilityLabel`s (wh
    - Sets `currentVideoURL` to video file path
    - Clears `text`
 4. Main view checks `if let videoURL = currentVideoURL`
-5. Shows `VideoPlayerView(videoURL:)` instead of TextEditor
+5. Shows `VideoPlayerView(videoURL:)` instead of `WritingEditor`
 6. Video auto-plays muted with standard AVKit controls
 
 ## Entry Loading Logic
@@ -671,24 +673,15 @@ Videos recorded on front-facing camera are often rotated 90°. The video file co
 
 **Performance Note**: Thumbnails are generated once when a recording is saved and persisted as `thumbnail.jpg` in each entry's video directory. Sidebar rows load precomputed image files instead of extracting frames from `.mov` during render. For older entries without thumbnails, the app lazily generates once and saves for subsequent loads.
 
-### Text Editor Header Behavior
+### Writing Editor (`WritingEditor.swift`, `MarkdownStyling.swift`)
 
-Every entry starts with `\n\n` (two newlines):
+The text editor is `WritingEditor`, an `NSViewRepresentable` wrapping a TextKit 2 `NSTextView` (`WritingTextView`) in a scroll view without scrollers. ContentView passes `text` (binding), the resolved font (`WritingEditor.font(named:size:)`: PostScript name → family → system font), `lineHeight` as line spacing, the theme text colour, `focusKey: selectedEntryId` and `canTakeFocus: !showingCommandPalette`.
 
-```swift
-TextEditor(text: Binding(
-    get: { text },
-    set: { newValue in
-        if !newValue.hasPrefix("\n\n") {
-            text = "\n\n" + newValue.trimmingCharacters(in: .newlines)
-        } else {
-            text = newValue
-        }
-    }
-))
-```
-
-**Why?** Creates visual breathing room at top of page. All entries look like they start mid-page, not cramped at the top edge.
+- **Binding**: `textDidChange` pushes the string to `text` (autosave is still `.onChange(of: text)`). `updateNSView` only replaces the view's string when `text` differs from the last value it saw or `focusKey` (the entry) changes, even if the text is identical; that load resets the caret to the start, scrolls to top and clears the editor's own `UndoManager` (via `undoManager(for:)`). Ordinary SwiftUI updates never touch the selection.
+- **Markdown styling** (syntax stays visible, markers dimmed): `MarkdownStyler.spans(in:range:)` returns UTF-16 `MarkdownSpan`s (headings, bold, italic, code, quote, list markers, strikethrough, links, `.syntax`) using line-local regexes. Inline patterns run on a copy of the lines with code spans and backslash escapes (`\*`, `\\`, …) blanked to U+0001, so escaped punctuation is never styled and emphasis can wrap code; the code span is applied after emphasis so its font wins only inside it. `MarkdownRenderer` turns them into attributes. Styling happens in `textStorage(_:didProcessEditing:...)` for `.editedCharacters` only and covers just the paragraph(s) of the edit; a full restyle runs on load and when font/size/theme change. Only attributes change, so the saved `.md` is byte-identical to what was typed, and attribute edits are not undoable. Lato Bold/Italic/BoldItalic are registered at launch for this; fonts without a face get synthesized bold/oblique.
+- **Highlights**: `EditorHighlight(id:range:color:comment:)` (UTF-16 range) via the `highlights:` parameter (no producer yet). Drawn as TextKit 2 rendering attributes (`.backgroundColor` on `NSTextLayoutManager`), so they never touch the storage or undo. Out-of-range highlights are ignored. Edits move them with `EditorHighlight.adjust(_:for:changeInLength:)` (pure, unit-tested). Hovering a highlight (tracking area → `characterIndexForInsertion` → segment rect) shows a themed `NSPopover` with the comment; it closes on exit, edit or scroll.
+- **Focus**: first responder when attached to the window, when `focusKey` changes, and when the palette closes.
+- Accessibility label/identifier (`Entry text` / `editor`) are set on the `NSTextView`. The top 40pt padding is outside the editor so the hidden-title-bar area stays draggable; do not make it ignore the top safe area.
 
 ### Entry Creation Logic
 
@@ -997,7 +990,7 @@ Check `~/Documents/Freewrite/` in Finder to verify files are being created.
 - `.onChange(of:)` for auto-save
 - `.onAppear` for initialization
 - `ForEach(entries)` with `Identifiable` for list rendering
-- Conditional views: `if currentVideoURL != nil { VideoPlayerView } else { TextEditor }`
+- Conditional views: `if currentVideoURL != nil { VideoPlayerView } else { WritingEditor }`
 
 ## Summary
 

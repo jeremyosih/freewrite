@@ -13,9 +13,11 @@ struct freewriteApp: App {
     @AppStorage(SettingsKey.colorScheme) private var colorSchemeString: String = "light"
     
     init() {
-        // Register Lato font
-        if let fontURL = Bundle.main.url(forResource: "Lato-Regular", withExtension: "ttf") {
-            CTFontManagerRegisterFontsForURL(fontURL as CFURL, .process, nil)
+        // Register Lato (bold/italic faces are used by the editor's markdown styling)
+        for face in ["Lato-Regular", "Lato-Bold", "Lato-Italic", "Lato-BoldItalic"] {
+            if let fontURL = Bundle.main.url(forResource: face, withExtension: "ttf") {
+                CTFontManagerRegisterFontsForURL(fontURL as CFURL, .process, nil)
+            }
         }
     }
      

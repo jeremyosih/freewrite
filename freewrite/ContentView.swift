@@ -974,18 +974,21 @@ struct ContentView: View {
                         .ignoresSafeArea(edges: .top)
                 } else {
                     // Show text editor for text entries
-                    TextEditor(text: $text)
+                    // Accessibility label/identifier ("Entry text" / "editor") live on the NSTextView.
+                    WritingEditor(
+                        text: $text,
+                        font: WritingEditor.font(named: selectedFont, size: fontSize),
+                        lineSpacing: lineHeight,
+                        textColor: colorScheme == .light
+                            ? NSColor(srgbRed: 0.20, green: 0.20, blue: 0.20, alpha: 1)
+                            : NSColor(srgbRed: 0.9, green: 0.9, blue: 0.9, alpha: 1),
+                        isDark: colorScheme == .dark,
+                        focusKey: selectedEntryId,
+                        canTakeFocus: !showingCommandPalette
+                    )
                     .background(Color(colorScheme == .light ? .white : .black))
-                    .font(.custom(selectedFont, size: fontSize))
-                    .foregroundColor(colorScheme == .light ? Color(red: 0.20, green: 0.20, blue: 0.20) : Color(red: 0.9, green: 0.9, blue: 0.9))
-                    .scrollContentBackground(.hidden)
-                    .scrollIndicators(.never)
-                    .accessibilityLabel("Entry text")
-                    .accessibilityIdentifier("editor")
-                    .lineSpacing(lineHeight)
                     .frame(maxWidth: 650)
                     .padding(.top, 40)
-                    .id("\(selectedFont)-\(fontSize)-\(colorScheme)")
                     .padding(.bottom, bottomNavOpacity > 0 ? navHeight : 0)
                     .colorScheme(colorScheme)
                     .onAppear {
