@@ -185,49 +185,146 @@ final class VoiceNoteRecorder: NSObject, AVAudioRecorderDelegate {
     }
 }
 
-/// Plays one voice note at a time (play/pause), for the version being viewed.
+/// Plays one voice note at a time, for the version being viewed: play/pause, seeking, speed, and
+/// the note's waveform (computed once off the main thread) for the bottom-bar player.
 @MainActor
 @Observable
 final class VoiceNotePlayer: NSObject, AVAudioPlayerDelegate {
+    static let rates: [Float] = [1, 1.5, 2]
+
+    /// The loaded note; the player stays in the bar until `stop()`, also when paused or finished.
     private(set) var url: URL?
     private(set) var isPlaying = false
+    private(set) var duration: TimeInterval = 0
+    private(set) var currentTime: TimeInterval = 0
+    /// Kept across notes, like a podcast player.
+    private(set) var rate: Float = 1
+    /// `Waveform.bucketCount` levels in 0…1; empty until computed.
+    private(set) var levels: [Float] = []
+    /// Live output level (0…1) while playing.
+    private(set) var meterLevel: Float = 0
+
+    var progress: Double { duration > 0 ? min(max(currentTime / duration, 0), 1) : 0 }
 
     @ObservationIgnored private var player: AVAudioPlayer?
+    @ObservationIgnored private var tickTimer: Timer?
+    /// Computes `levels` for the loaded note; cancelled when it's stopped or replaced.
+    @ObservationIgnored private var waveformTask: Task<Void, Never>?
 
-    /// `load` supplies the bytes instead of reading `url` (a locked note's decrypted audio, kept
-    /// in memory only).
+    /// Plays `url`, or pauses/resumes it when it's the loaded note. `load` supplies the bytes
+    /// instead of reading `url` (a locked note's decrypted audio, kept in memory only).
     func toggle(_ url: URL, load: (() throws -> Data)? = nil) {
-        if self.url == url, let player {
-            if player.isPlaying {
-                player.pause()
-                isPlaying = false
-            } else {
-                isPlaying = player.play()
-            }
-            return
-        }
-        stop()
-        do {
-            let player = try load.map { try AVAudioPlayer(data: $0()) } ?? AVAudioPlayer(contentsOf: url)
-            player.delegate = self
-            self.player = player
-            self.url = url
-            isPlaying = player.play()
-        } catch {
-            print("Voice note: couldn't play \(url.lastPathComponent): \(error)")
+        if self.url == url, player != nil {
+            isPlaying ? pause() : resume()
+        } else {
+            self.load(url, data: load)
         }
     }
 
+    func pause() {
+        player?.pause()
+        isPlaying = false
+        stopTicking()
+    }
+
+    func resume() {
+        guard let player else { return }
+        player.rate = rate
+        isPlaying = player.play()
+        if isPlaying { startTicking() }
+    }
+
+    /// Jumps to `fraction` (0…1) of the note.
+    func seek(toFraction fraction: Double) {
+        guard let player, duration > 0 else { return }
+        player.currentTime = min(max(fraction, 0), 1) * duration
+        currentTime = player.currentTime
+    }
+
+    /// 1× → 1.5× → 2× → 1×.
+    func cycleRate() {
+        let index = Self.rates.firstIndex(of: rate) ?? 0
+        rate = Self.rates[(index + 1) % Self.rates.count]
+        player?.rate = rate
+    }
+
     func stop() {
+        stopTicking()
+        waveformTask?.cancel()
+        waveformTask = nil
         player?.stop()
         player = nil
         url = nil
         isPlaying = false
+        duration = 0
+        currentTime = 0
+        levels = []
+        meterLevel = 0
+    }
+
+    private func load(_ url: URL, data load: (() throws -> Data)?) {
+        stop()
+        let data: Data?
+        do {
+            data = try load?()
+            let player = try data.map { try AVAudioPlayer(data: $0) } ?? AVAudioPlayer(contentsOf: url)
+            player.delegate = self
+            player.enableRate = true
+            player.isMeteringEnabled = true
+            player.prepareToPlay()
+            self.player = player
+            self.url = url
+            duration = player.duration
+            resume()
+        } catch {
+            print("Voice note: couldn't play \(url.lastPathComponent): \(error)")
+            return
+        }
+        waveformTask = Task { [weak self] in
+            let job = Task.detached(priority: .utility) {
+                (try? data.map { try Waveform.levels(of: $0) } ?? Waveform.levels(of: url)) ?? []
+            }
+            // A detached task doesn't inherit cancellation: pass it on.
+            let levels = await withTaskCancellationHandler { await job.value } onCancel: { job.cancel() }
+            guard !Task.isCancelled, let self, self.url == url else { return }
+            self.levels = levels
+        }
+    }
+
+    private func startTicking() {
+        guard tickTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] timer in
+            // A player released without `stop()` mustn't leave its timer firing.
+            guard let self else { return timer.invalidate() }
+            MainActor.assumeIsolated { self.tick() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        tickTimer = timer
+    }
+
+    private func stopTicking() {
+        tickTimer?.invalidate()
+        tickTimer = nil
+        meterLevel = 0
+    }
+
+    private func tick() {
+        guard let player else { return }
+        currentTime = player.currentTime
+        player.updateMeters()
+        // -50 dB and below reads as silence.
+        meterLevel = max(0, min(1, (player.averagePower(forChannel: 0) + 50) / 50))
     }
 
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        let id = ObjectIdentifier(player)
         Task { @MainActor in
+            guard let current = self.player, ObjectIdentifier(current) == id else { return }
             self.isPlaying = false
+            self.stopTicking()
+            // Back to the start; the player stays so the note can be replayed.
+            current.currentTime = 0
+            self.currentTime = 0
         }
     }
 }

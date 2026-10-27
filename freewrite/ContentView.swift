@@ -155,7 +155,6 @@ struct ContentView: View {
     @State private var isPreparingVideoRecording = false
     @State private var preparedCameraManager: CameraManager? = nil
     @State private var videoRecordingPreparationID: UUID? = nil
-    @State private var showingVideoPermissionPopover = false
     @State private var videoPermissionPopoverItems: [VideoPermissionPopoverItem] = []
     @State private var videoPermissionPopoverFallbackMessage: String? = nil
     /// Saved manifest of the selected text entry; nil while it has a single version.
@@ -163,7 +162,6 @@ struct ContentView: View {
     /// A sealed version shown read-only in place of the current text (`text` is left alone).
     @State private var viewedVersion: EntryVersion? = nil
     @State private var viewedVersionText = ""
-    @State private var showingVersionMenu = false
     @State private var isHoveringVersion = false
     @State private var isHoveringBackToCurrent = false
     @State private var isHoveringPlayVoiceNote = false
@@ -173,7 +171,6 @@ struct ContentView: View {
     @State private var isHoveringVoiceNoteButton = false
     @State private var isHoveringStopVoiceNote = false
     @State private var isHoveringDiscardVoiceNote = false
-    @State private var showingMicrophonePermissionPopover = false
     // AI reviewers (Reviews.swift): notes on the selected entry, anchored to `annotationsBaseText`
     // for the current version.
     @ObservedObject private var reviews = ReviewService.shared
@@ -184,7 +181,18 @@ struct ContentView: View {
     @State private var annotationSaveTask: Task<Void, Never>? = nil
     /// Anchors moved by typing, not written yet (saved after a 1 s pause or by `flushAnnotationAnchors`).
     @State private var pendingAnchors: PendingAnchors? = nil
-    @State private var showingReviewMenu = false
+    /// The floating bar menu that's open (BarMenu.swift), its keyboard highlight and key monitor.
+    @State private var openBarMenu: BarMenuKind? = nil
+    @State private var barMenuHighlight: String? = nil
+    @State private var barMenuKeyMonitor: Any?
+    /// The window the open menu belongs to (keys from other windows pass through) and the
+    /// observer that closes the menu when that window stops being key.
+    @State private var barMenuWindow: NSWindow?
+    @State private var barMenuResignObserver: Any?
+    @State private var isHoveringOverflow = false
+    /// Items in the "…" menu of the bar on screen.
+    @State private var barOverflow: [BottomBarItem] = []
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHoveringReview = false
     /// Keys of locked notes while they are open (Touch ID / Apple Watch / password).
     private let noteLock = NoteLockSession.shared
@@ -714,15 +722,105 @@ struct ContentView: View {
         }
     }
 
+    /// The bottom bar with `overflow` moved into a "…" menu.
+    private func bottomBarRow(overflow: [BottomBarItem], isViewingVideoEntry: Bool) -> some View {
+        HStack {
+            HStack(spacing: 8) {
+                if !isViewingVideoEntry && textEntryStatusVisible {
+                    textEntryStatus(textColor: textColor, textHoverColor: textHoverColor)
+                }
+                if isViewingVideoEntry {
+                    HStack(spacing: 8) {
+                        if let transcriptionStatus {
+                            Text(transcriptionStatus)
+                                .font(.system(size: 13))
+                                .foregroundColor(textColor)
+                                .lineLimit(1)
+                                .frame(maxWidth: 280, alignment: .leading)
+                                .help(transcriptionStatus)
+                        }
+                        if selectedVideoHasTranscript {
+                            Button(action: {
+                                copyTranscriptForSelectedVideoEntry()
+                            }) {
+                                Text(didCopyTranscript ? "Copied Transcript" : "Copy Transcript")
+                                    .font(.system(size: 13))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("copyTranscriptButton")
+                            .foregroundColor(isHoveringCopyTranscript ? textHoverColor : textColor)
+                            .onHover { hovering in
+                                isHoveringCopyTranscript = hovering
+                                isHoveringBottomNav = hovering
+                                if hovering {
+                                    NSCursor.pointingHand.push()
+                                } else {
+                                    NSCursor.pop()
+                                }
+                            }
+                        }
+                    }
+                }
+                bottomBarGroup(bottomBarLayout.left.filter { !overflow.contains($0) }, leading: isViewingVideoEntry ? (transcriptionStatus != nil || selectedVideoHasTranscript) : textEntryStatusVisible)
+            }
+            .padding(8)
+            .cornerRadius(6)
+            .onHover { hovering in
+                isHoveringBottomNav = hovering
+            }
+            // Sized first, then the right side; otherwise both get an equal share and the
+            // status, separators and version label are squeezed while the spacer keeps room.
+            .layoutPriority(2)
+
+            Spacer()
+
+            HStack(spacing: 8) {
+                bottomBarGroup(bottomBarLayout.right.filter { !overflow.contains($0) }, overflow: overflow)
+            }
+            .barMenuAnchor(.barRight)
+            .padding(8)
+            .cornerRadius(6)
+            .onHover { hovering in
+                isHoveringBottomNav = hovering
+            }
+            .layoutPriority(1)
+            // While a voice note records, the bar turns into its controls.
+            .opacity(voiceRecorder.isRecording ? 0 : 1)
+            .allowsHitTesting(!voiceRecorder.isRecording)
+            .overlay(alignment: .trailing) {
+                if voiceRecorder.isRecording {
+                    voiceNoteRecordingBar(textColor: textColor, textHoverColor: textHoverColor)
+                }
+            }
+        }
+    }
+
+    /// Visible bar items that may move into "…", in the order they do.
+    private var barOverflowCandidates: [BottomBarItem] {
+        let visible = Set((bottomBarLayout.left + bottomBarLayout.right).filter(isBottomBarItemAvailable))
+        return Self.overflowOrder.filter(visible.contains)
+    }
+
     @ViewBuilder
-    private func bottomBarGroup(_ items: [BottomBarItem], leading: Bool = false) -> some View {
-        let visible = items.filter(isBottomBarItemAvailable)
+    private func bottomBarGroup(_ items: [BottomBarItem], leading: Bool = false, overflow: [BottomBarItem] = []) -> some View {
+        // nil is the "…" button, placed before the gear so Settings stays last.
+        let visible: [BottomBarItem?] = {
+            var visible: [BottomBarItem?] = items.filter(isBottomBarItemAvailable)
+            if !overflow.isEmpty {
+                visible.insert(nil, at: visible.firstIndex(of: .settings) ?? visible.endIndex)
+            }
+            return visible
+        }()
         ForEach(Array(visible.enumerated()), id: \.element) { index, item in
             if index > 0 || leading {
                 Text("•")
                     .foregroundColor(.gray)
             }
-            bottomBarItemView(item)
+            if let item {
+                bottomBarItemView(item)
+            } else {
+                overflowButton(items: overflow, textColor: textColor, textHoverColor: textHoverColor)
+            }
         }
     }
 
@@ -762,31 +860,6 @@ struct ContentView: View {
                         NSCursor.pop()
                     }
                 }
-                .onAppear {
-                    guard scrollWheelMonitor == nil else { return }
-                    scrollWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
-                        if isHoveringTimer {
-                            let scrollBuffer = event.deltaY * 0.25
-                            
-                            if abs(scrollBuffer) >= 0.1 {
-                                let currentMinutes = timeRemaining / 60
-                                NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-                                let direction = -scrollBuffer > 0 ? 5 : -5
-                                let newMinutes = currentMinutes + direction
-                                let roundedMinutes = (newMinutes / 5) * 5
-                                let newTime = roundedMinutes * 60
-                                timeRemaining = min(max(newTime, 0), 2700)
-                            }
-                        }
-                        return event
-                    }
-                }
-                .onDisappear {
-                    if let scrollWheelMonitor {
-                        NSEvent.removeMonitor(scrollWheelMonitor)
-                        self.scrollWheelMonitor = nil
-                    }
-                }
         case .recordVideo:
                 Button(action: {
                     guard !isPreparingVideoRecording else { return }
@@ -816,61 +889,7 @@ struct ContentView: View {
                         NSCursor.pop()
                     }
                 }
-                .popover(
-                    isPresented: $showingVideoPermissionPopover,
-                    attachmentAnchor: .point(UnitPoint(x: 0.5, y: 0.0)),
-                    arrowEdge: .top
-                ) {
-                    VStack(spacing: 0) {
-                        if let fallbackMessage = videoPermissionPopoverFallbackMessage {
-                            Text(fallbackMessage)
-                                .font(.system(size: 14))
-                                .foregroundColor(popoverTextColor)
-                                .lineLimit(nil)
-                                .multilineTextAlignment(.leading)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                    }
-
-                        ForEach(videoPermissionPopoverItems) { item in
-                            if item.id != videoPermissionPopoverItems.first?.id || videoPermissionPopoverFallbackMessage != nil {
-                                Divider()
-                            }
-
-                            Button(action: {
-                                showingVideoPermissionPopover = false
-                                openVideoPermissionSettings(item.settingsPane)
-                            }) {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(item.message)
-                                        .font(.system(size: 14))
-                                        .lineLimit(nil)
-                                        .multilineTextAlignment(.leading)
-                                        .fixedSize(horizontal: false, vertical: true)
-
-                                    Text(item.buttonLabel)
-                                        .font(.system(size: 12))
-                                        .opacity(0.85)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundColor(popoverTextColor)
-                            .onHover { hovering in
-                                if hovering {
-                                    NSCursor.pointingHand.push()
-                                } else {
-                                    NSCursor.pop()
-                                }
-                            }
-                        }
-                    }
-                    .frame(minWidth: 300, idealWidth: 320, maxWidth: 360)
-                    .background(colorScheme == .light ? Color.white : Color.black)
-                }
+                .barMenuAnchor(.item(.recordVideo))
         case .backspace:
                 Button(action: {
                     backspaceDisabled.toggle()
@@ -1134,7 +1153,7 @@ struct ContentView: View {
         }
 
         showingCommandPalette = false
-        showingVideoPermissionPopover = false
+        closeBarMenu(.videoPermission)
         videoPermissionPopoverItems = []
         videoPermissionPopoverFallbackMessage = nil
 
@@ -1175,7 +1194,7 @@ struct ContentView: View {
                 )
                 self.videoPermissionPopoverItems = payload.items
                 self.videoPermissionPopoverFallbackMessage = payload.fallbackMessage
-                self.showingVideoPermissionPopover = true
+                self.showBarMenu(.videoPermission)
                 self.clearVideoRecordingPreparationState()
             }
         }
@@ -1571,7 +1590,7 @@ struct ContentView: View {
     private func resetVersionState(for entry: HumanEntry?) {
         viewedVersion = nil
         viewedVersionText = ""
-        showingVersionMenu = false
+        closeBarMenu()
         voicePlayer.stop()
         if let entry, entry.entryType == .text {
             // Every text entry has at least v1, so the version menu (and New Version) is always there.
@@ -1663,13 +1682,13 @@ struct ContentView: View {
             return
         }
         guard !isRequestingMicrophone, !isPreparingVideoRecording, !showingVideoRecording else { return }
-        showingMicrophonePermissionPopover = false
+        closeBarMenu(.microphonePermission)
         isRequestingMicrophone = true
         Task {
             let granted = await VoiceNoteRecorder.requestMicrophoneAccess()
             isRequestingMicrophone = false
             guard granted else {
-                showingMicrophonePermissionPopover = true
+                showBarMenu(.microphonePermission)
                 return
             }
             do {
@@ -1873,14 +1892,6 @@ struct ContentView: View {
         return (fontSize * 1.5) - defaultLineHeight
     }
     
-    var popoverBackgroundColor: Color {
-        return colorScheme == .light ? Color(NSColor.controlBackgroundColor) : Color(NSColor.darkGray)
-    }
-
-    var popoverTextColor: Color {
-        return colorScheme == .light ? Color.primary : Color.white
-    }
-
     
     var body: some View {
         let navHeight: CGFloat = 68
@@ -1974,75 +1985,13 @@ struct ContentView: View {
                     )
                 }
 
-                if let viewedVersion, !isViewingVideoEntry {
-                    versionBanner(for: viewedVersion, textColor: textColor, textHoverColor: textHoverColor)
-                }
-                
                 VStack {
                     Spacer()
-                    HStack {
-                        HStack(spacing: 8) {
-                            if !isViewingVideoEntry && textEntryStatusVisible {
-                                textEntryStatus(textColor: textColor, textHoverColor: textHoverColor)
-                            }
-                            if isViewingVideoEntry {
-                                HStack(spacing: 8) {
-                                    if let transcriptionStatus {
-                                        Text(transcriptionStatus)
-                                            .font(.system(size: 13))
-                                            .foregroundColor(textColor)
-                                    }
-                                    if selectedVideoHasTranscript {
-                                        Button(action: {
-                                            copyTranscriptForSelectedVideoEntry()
-                                        }) {
-                                            Text(didCopyTranscript ? "Copied Transcript" : "Copy Transcript")
-                                                .font(.system(size: 13))
-                                        }
-                                        .buttonStyle(.plain)
-                                        .accessibilityIdentifier("copyTranscriptButton")
-                                        .foregroundColor(isHoveringCopyTranscript ? textHoverColor : textColor)
-                                        .onHover { hovering in
-                                            isHoveringCopyTranscript = hovering
-                                            isHoveringBottomNav = hovering
-                                            if hovering {
-                                                NSCursor.pointingHand.push()
-                                            } else {
-                                                NSCursor.pop()
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            bottomBarGroup(bottomBarLayout.left, leading: isViewingVideoEntry ? (transcriptionStatus != nil || selectedVideoHasTranscript) : textEntryStatusVisible)
-                        }
-                        .padding(8)
-                        .cornerRadius(6)
-                        .onHover { hovering in
-                            isHoveringBottomNav = hovering
-                        }
-
-                        Spacer()
-
-                        HStack(spacing: 8) {
-                            bottomBarGroup(bottomBarLayout.right)
-                        }
-                        // Review with… when the Review item itself isn't in the bar.
-                        .popover(isPresented: reviewMenuBinding(onItem: false), attachmentAnchor: .point(UnitPoint(x: 0.9, y: 0)), arrowEdge: .top) {
-                            reviewMenu()
-                        }
-                        .padding(8)
-                        .cornerRadius(6)
-                        .onHover { hovering in
-                            isHoveringBottomNav = hovering
-                        }
-                        // While a voice note records, the bar turns into its controls.
-                        .opacity(voiceRecorder.isRecording ? 0 : 1)
-                        .allowsHitTesting(!voiceRecorder.isRecording)
-                        .overlay(alignment: .trailing) {
-                            if voiceRecorder.isRecording {
-                                voiceNoteRecordingBar(textColor: textColor, textHoverColor: textHoverColor)
-                            }
+                    // Items move into "…" (right to left in `overflowOrder`) rather than being
+                    // clipped when the bar doesn't fit; Settings always stays.
+                    ViewThatFits(in: .horizontal) {
+                        ForEach(0...barOverflowCandidates.count, id: \.self) { count in
+                            bottomBarRow(overflow: Array(barOverflowCandidates.prefix(count)), isViewingVideoEntry: isViewingVideoEntry)
                         }
                     }
                     .padding()
@@ -2267,6 +2216,9 @@ struct ContentView: View {
                 .background(Color(colorScheme == .light ? .white : NSColor.black).ignoresSafeArea(edges: .top))
             }
         }
+        .overlayPreferenceValue(BarMenuAnchorKey.self) { anchors in
+            barMenuOverlay(anchors)
+        }
         .overlay {
             if showingCommandPalette {
                 CommandPaletteView(
@@ -2300,17 +2252,29 @@ struct ContentView: View {
         .preferredColorScheme(colorScheme)
         .onAppear {
             WritingWindow.openCount += 1
+            installTimerScrollMonitor()
             showingSidebar = false  // Hide sidebar by default
             timeRemaining = sessionMinutes * 60
             loadExistingEntries()
         }
         .onDisappear {
             WritingWindow.openCount -= 1
+            closeBarMenu()
+            voicePlayer.stop()  // also ends its 30 Hz tick timer
+            if let scrollWheelMonitor {
+                NSEvent.removeMonitor(scrollWheelMonitor)
+                self.scrollWheelMonitor = nil
+            }
             flushAnnotationAnchors()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             flushAnnotationAnchors()
         }
+        // A bar menu belongs to what was on screen when it opened.
+        .onChange(of: selectedEntryId) { closeBarMenu() }
+        .onChange(of: currentVideoURL) { closeBarMenu() }
+        .onChange(of: showingCommandPalette) { if showingCommandPalette { closeBarMenu() } }
+        .onChange(of: voiceRecorder.isRecording) { if voiceRecorder.isRecording { closeBarMenu() } }
         .onChange(of: storage.rootURL) {
             // The entries folder changed in Settings; show what's in the new one.
             // Reviews stay tied to the folder they started in, so they stop here.
@@ -2413,6 +2377,28 @@ struct ContentView: View {
         }
     }
     
+    /// Scrolling over the timer changes it in 5-minute steps. Installed once per window, not by
+    /// the timer button, which comes and goes as the bar overflows.
+    private func installTimerScrollMonitor() {
+        guard scrollWheelMonitor == nil else { return }
+        scrollWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            if isHoveringTimer {
+                let scrollBuffer = event.deltaY * 0.25
+
+                if abs(scrollBuffer) >= 0.1 {
+                    let currentMinutes = timeRemaining / 60
+                    NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+                    let direction = -scrollBuffer > 0 ? 5 : -5
+                    let newMinutes = currentMinutes + direction
+                    let roundedMinutes = (newMinutes / 5) * 5
+                    let newTime = roundedMinutes * 60
+                    timeRemaining = min(max(newTime, 0), 2700)
+                }
+            }
+            return event
+        }
+    }
+
     // MARK: Version & voice note controls
 
     private func hoverCursor(_ hovering: Bool) {
@@ -2430,7 +2416,7 @@ struct ContentView: View {
     private func versionsButton(textColor: Color, textHoverColor: Color) -> some View {
         if let manifest = entryManifest {
             Button(action: {
-                showingVersionMenu.toggle()
+                toggleBarMenu(.versions)
             }) {
                 HStack(spacing: 3) {
                     Text(displayedVersion?.id ?? manifest.current)
@@ -2438,7 +2424,7 @@ struct ContentView: View {
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.system(size: 9))
                 }
-                .foregroundColor(isHoveringVersion ? textHoverColor : textColor)
+                .foregroundColor(isHoveringVersion || openBarMenu == .versions ? textHoverColor : textColor)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Version \(displayedVersion?.n ?? 1) of \(manifest.versions.count)")
@@ -2449,190 +2435,131 @@ struct ContentView: View {
                 isHoveringBottomNav = hovering
                 hoverCursor(hovering)
             }
-            .popover(isPresented: $showingVersionMenu, attachmentAnchor: .point(UnitPoint(x: 0.5, y: 0)), arrowEdge: .top) {
-                versionMenu(manifest)
-            }
+            .barMenuAnchor(.item(.versions))
         }
     }
 
-    /// Fixed start of the left side for text entries: the current version's voice note and
-    /// transient status (transcribing, errors).
+    /// Voice notes of the version on screen (the current one, or a sealed one being viewed).
+    private var displayedAudioURLs: [URL] {
+        guard !isSelectedNoteClosed else { return [] }
+        return displayedVersion.map(audioURLs(for:)) ?? []
+    }
+
+    /// Fixed start of the left side for text entries: the read-only notice of a sealed version,
+    /// the displayed version's voice note (or its player) and transient status (transcribing,
+    /// reviews, errors).
     private var textEntryStatusVisible: Bool {
-        transcriptionStatus != nil || runningReview != nil || (viewedVersion == nil && !isSelectedNoteClosed && entryManifest?.currentVersion.flatMap(audioURL(for:)) != nil)
+        viewedVersion != nil || !displayedAudioURLs.isEmpty || transcriptionStatus != nil || runningReview != nil
     }
 
     @ViewBuilder
     private func textEntryStatus(textColor: Color, textHoverColor: Color) -> some View {
-        if viewedVersion == nil, !isSelectedNoteClosed, let current = entryManifest?.currentVersion, !audioURLs(for: current).isEmpty {
-            playVoiceNotes(audioURLs(for: current), textColor: textColor, textHoverColor: textHoverColor)
-        }
-        if let transcriptionStatus {
-            Text(transcriptionStatus)
+        let urls = displayedAudioURLs
+        let parts = [viewedVersion != nil, !urls.isEmpty, transcriptionStatus != nil || runningReview != nil]
+        let separatorBefore = { (index: Int) in parts[..<index].contains(true) }
+        if let viewedVersion {
+            Text("Viewing \(viewedVersion.id) · read-only")
                 .font(.system(size: 13))
                 .foregroundColor(textColor)
-                .lineLimit(1)
-        } else if let runningReview {
-            Text("\(runningReview.reviewerName) is reading \(runningReview.versionId)…")
-                .font(.system(size: 13))
-                .foregroundColor(textColor)
-                .lineLimit(1)
-        }
-    }
-
-    private func versionMenu(_ manifest: EntryManifest) -> some View {
-        VStack(spacing: 0) {
-            ForEach(manifest.versions.reversed()) { version in
-                Button(action: {
-                    showingVersionMenu = false
-                    showVersion(version.id)
-                }) {
-                    HStack(spacing: 8) {
-                        Text(version.id)
-                            .font(.system(size: 13, weight: .medium).monospacedDigit())
-                        Text(versionDetail(version, in: manifest))
-                            .font(.system(size: 12))
-                            .opacity(0.6)
-                        Spacer(minLength: 12)
-                        if version.id == displayedVersion?.id {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 10, weight: .semibold))
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundColor(popoverTextColor)
-                .accessibilityIdentifier("versionRow-\(version.id)")
-                .onHover { hovering in
-                    if hovering {
-                        NSCursor.pointingHand.push()
-                    } else {
-                        NSCursor.pop()
-                    }
-                }
-                Divider()
-            }
-            Button(action: {
-                showingVersionMenu = false
-                createNewVersion()
-            }) {
-                HStack {
-                    Text("New Version")
-                        .font(.system(size: 13))
-                    Spacer(minLength: 12)
-                    Text(ShortcutStore.shortcut(for: .newVersion, in: shortcutsJSON)?.displayString ?? "")
-                        .font(.system(size: 12))
-                        .opacity(0.6)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .contentShape(Rectangle())
+                .fixedSize()
+            Text("•")
+                .foregroundColor(.gray)
+            Button("Back to current") {
+                showCurrentVersion()
             }
             .buttonStyle(.plain)
-            .foregroundColor(popoverTextColor)
-            .accessibilityIdentifier("newVersionButton")
+            .font(.system(size: 13))
+            .fixedSize()
+            .accessibilityIdentifier("backToCurrentVersionButton")
+            .foregroundColor(isHoveringBackToCurrent ? textHoverColor : textColor)
             .onHover { hovering in
-                if hovering {
-                    NSCursor.pointingHand.push()
-                } else {
-                    NSCursor.pop()
-                }
+                isHoveringBackToCurrent = hovering
+                hoverCursor(hovering)
             }
         }
-        .frame(width: 250)
-        .background(popoverBackgroundColor)
-    }
-
-    /// Top of the editor while a sealed version is shown read-only.
-    private func versionBanner(for version: EntryVersion, textColor: Color, textHoverColor: Color) -> some View {
-        VStack {
-            HStack(spacing: 8) {
-                Text("Viewing \(version.id) · read-only")
-                    .foregroundColor(textColor)
-                if !audioURLs(for: version).isEmpty {
-                    Text("•")
-                        .foregroundColor(.gray)
-                    playVoiceNotes(audioURLs(for: version), textColor: textColor, textHoverColor: textHoverColor)
-                }
+        if !urls.isEmpty {
+            if separatorBefore(1) {
                 Text("•")
                     .foregroundColor(.gray)
-                Button("Back to current") {
-                    showCurrentVersion()
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("backToCurrentVersionButton")
-                .foregroundColor(isHoveringBackToCurrent ? textHoverColor : textColor)
-                .onHover { hovering in
-                    isHoveringBackToCurrent = hovering
-                    if hovering {
-                        NSCursor.pointingHand.push()
-                    } else {
-                        NSCursor.pop()
-                    }
-                }
             }
-            .font(.system(size: 13))
-            .padding(.top, 12)
-            Spacer()
+            voiceNoteControls(urls, textColor: textColor, textHoverColor: textHoverColor)
+        }
+        if let status = transcriptionStatus ?? runningReview.map({ "\($0.reviewerName) is reading \($0.versionId)…" }) {
+            if separatorBefore(2) {
+                Text("•")
+                    .foregroundColor(.gray)
+            }
+            Text(status)
+                .font(.system(size: 13))
+                .foregroundColor(textColor)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: 280, alignment: .leading)
+                .help(status)
         }
     }
 
-    /// One play button, or a menu of every voice note when a version has more than one.
+    /// The player while one of `urls` is loaded; otherwise "Play voice note", or "2 voice notes"
+    /// opening a menu to choose one.
     @ViewBuilder
-    private func playVoiceNotes(_ urls: [URL], textColor: Color, textHoverColor: Color) -> some View {
-        if urls.count == 1, let url = urls.first {
-            playVoiceNoteButton(url: url, textColor: textColor, textHoverColor: textHoverColor)
-        } else {
-            let playing = urls.firstIndex { voicePlayer.url == $0 && voicePlayer.isPlaying }
-            Menu {
-                ForEach(Array(urls.enumerated()), id: \.element) { index, url in
-                    Button(voicePlayer.url == url && voicePlayer.isPlaying ? "Pause voice note \(index + 1)" : "Play voice note \(index + 1)") {
-                        toggleVoiceNote(url)
-                    }
-                }
-            } label: {
+    private func voiceNoteControls(_ urls: [URL], textColor: Color, textHoverColor: Color) -> some View {
+        if let loaded = voicePlayer.url, let index = urls.firstIndex(of: loaded) {
+            if urls.count > 1 {
+                voiceNotesMenuButton(title: "\(index + 1)/\(urls.count)", textColor: textColor, textHoverColor: textHoverColor)
+            }
+            VoiceNotePlayerBar(player: voicePlayer, textColor: textColor, textHoverColor: textHoverColor) {
+                voicePlayer.stop()
+            }
+            .fixedSize()
+        } else if urls.count == 1, let url = urls.first {
+            Button(action: {
+                toggleVoiceNote(url)
+            }) {
                 HStack(spacing: 4) {
-                    Image(systemName: playing == nil ? "play.fill" : "pause.fill")
+                    Image(systemName: "play.fill")
                         .font(.system(size: 10))
-                    Text(playing.map { "Voice note \($0 + 1) of \(urls.count)" } ?? "\(urls.count) voice notes")
+                    Text("Play voice note")
                         .font(.system(size: 13))
                 }
                 .foregroundColor(isHoveringPlayVoiceNote ? textHoverColor : textColor)
             }
-            .menuStyle(.button)
             .buttonStyle(.plain)
-            .menuIndicator(.hidden)
             .fixedSize()
-            .accessibilityIdentifier("playVoiceNotesMenu")
+            .accessibilityIdentifier("playVoiceNoteButton")
             .onHover { hovering in
                 isHoveringPlayVoiceNote = hovering
                 hoverCursor(hovering)
             }
+        } else {
+            voiceNotesMenuButton(title: "\(urls.count) voice notes", systemImage: "play.fill", textColor: textColor, textHoverColor: textHoverColor)
         }
     }
 
-    private func playVoiceNoteButton(url: URL, textColor: Color, textHoverColor: Color) -> some View {
-        let isPlaying = voicePlayer.url == url && voicePlayer.isPlaying
-        return Button(action: {
-            toggleVoiceNote(url)
+    private func voiceNotesMenuButton(title: String, systemImage: String? = nil, textColor: Color, textHoverColor: Color) -> some View {
+        Button(action: {
+            toggleBarMenu(.voiceNotes)
         }) {
             HStack(spacing: 4) {
-                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 10))
-                Text(isPlaying ? "Pause voice note" : "Play voice note")
-                    .font(.system(size: 13))
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 10))
+                }
+                Text(title)
+                    .font(.system(size: 13).monospacedDigit())
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9))
             }
-            .foregroundColor(isHoveringPlayVoiceNote ? textHoverColor : textColor)
+            .foregroundColor(isHoveringPlayVoiceNote || openBarMenu == .voiceNotes ? textHoverColor : textColor)
         }
         .buttonStyle(.plain)
-        .accessibilityIdentifier("playVoiceNoteButton")
+        .fixedSize()
+        .accessibilityLabel("Choose voice note")
+        .accessibilityIdentifier("playVoiceNotesMenu")
         .onHover { hovering in
             isHoveringPlayVoiceNote = hovering
             hoverCursor(hovering)
         }
+        .barMenuAnchor(.voiceNotes)
     }
 
     /// Microphone next to the video camera; records an audio-only voice note.
@@ -2659,32 +2586,7 @@ struct ContentView: View {
             isHoveringVoiceNoteButton = hovering
             hoverCursor(hovering)
         }
-        .popover(
-            isPresented: $showingMicrophonePermissionPopover,
-            attachmentAnchor: .point(UnitPoint(x: 0.5, y: 0.0)),
-            arrowEdge: .top
-        ) {
-            Button(action: {
-                showingMicrophonePermissionPopover = false
-                openVideoPermissionSettings("Privacy_Microphone")
-            }) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Hey, we need microphone permission.")
-                        .font(.system(size: 14))
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text("Open Microphone Settings")
-                        .font(.system(size: 12))
-                        .opacity(0.85)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-            }
-            .buttonStyle(.plain)
-            .foregroundColor(popoverTextColor)
-            .frame(minWidth: 300, idealWidth: 320, maxWidth: 360)
-            .background(colorScheme == .light ? Color.white : Color.black)
-        }
+        .barMenuAnchor(.item(.recordVoiceNote))
     }
 
     /// `● 3:42 ▁▃▅▂ Stop • Discard`, shown in place of the utility buttons while recording.
@@ -3552,24 +3454,14 @@ extension ContentView {
         withAnimation(.easeOut(duration: 0.2)) {
             bottomNavOpacity = 1.0
         }
-        showingReviewMenu.toggle()
-    }
-
-    private var isReviewItemInBar: Bool {
-        (bottomBarLayout.left + bottomBarLayout.right).contains(.review) && isBottomBarItemAvailable(.review)
-    }
-
-    /// The menu hangs off the Review item when it's in the bar, else off the right side of the bar.
-    private func reviewMenuBinding(onItem: Bool) -> Binding<Bool> {
-        Binding(
-            get: { showingReviewMenu && isReviewItemInBar == onItem },
-            set: { showingReviewMenu = $0 }
-        )
+        if openBarMenu != .review {
+            Task { await reviews.refreshCredentials() }
+        }
+        toggleBarMenu(.review)
     }
 
     /// Reviews the version on screen with `profile`.
     private func startReview(_ profile: ReviewerProfile) {
-        showingReviewMenu = false
         guard let entry = selectedTextEntry, let version = displayedVersion else { return }
         if version.id == entryManifest?.current {
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -3617,7 +3509,7 @@ extension ContentView {
                         .tint(isHoveringReview ? textHoverColor : textColor)
                 } else {
                     Image(systemName: "sparkles")
-                        .foregroundColor(isHoveringReview ? textHoverColor : textColor)
+                        .foregroundColor(isHoveringReview || openBarMenu == .review ? textHoverColor : textColor)
                 }
             }
             .frame(width: 14, height: 14)
@@ -3630,120 +3522,344 @@ extension ContentView {
             isHoveringReview = hovering
             hoverCursor(hovering)
         }
-        .popover(isPresented: reviewMenuBinding(onItem: true), attachmentAnchor: .point(UnitPoint(x: 0.5, y: 0)), arrowEdge: .top) {
-            reviewMenu()
-        }
+        .barMenuAnchor(.item(.review))
     }
 
-    private func reviewMenu() -> some View {
+    /// Review with…: reviewers, the latest summary for the version, Clear Review, settings.
+    private var reviewMenuContent: BarMenuContent {
         let version = displayedVersion
         let versionNotes = annotations.filter { $0.versionId == version?.id && $0.status != .dismissed }
         let summary = selectedTextEntry.flatMap { entry in
             version.flatMap { annotationStore.latestSummary(versionId: $0.id, entryFilename: entry.filename) }
         }
         let configured = reviews.credentialStates.values.contains(where: \.isConfigured)
-        return VStack(alignment: .leading, spacing: 0) {
-            Text("Review \(version?.id ?? "v1") with")
-                .font(.system(size: 11, weight: .medium))
-                .opacity(0.6)
-                .padding(.horizontal, 12)
-                .padding(.top, 9)
-                .padding(.bottom, 2)
-            Text("Sends this entry's text to the reviewer's provider.")
-                .font(.system(size: 10))
-                .opacity(0.5)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 4)
-            ForEach(reviewerProfiles) { profile in
-                reviewMenuRow {
-                    startReview(profile)
-                } label: {
-                    Circle()
-                        .fill(Color(nsColor: profile.color.nsColor))
-                        .frame(width: 8, height: 8)
-                    Text(profile.name)
-                        .font(.system(size: 13))
-                    Spacer(minLength: 12)
-                }
-                .disabled(runningReview != nil)
-                .accessibilityIdentifier("reviewWith-\(profile.id)")
-            }
-            if let runningReview {
-                Text("\(runningReview.reviewerName) is reading \(runningReview.versionId)…")
-                    .font(.system(size: 12))
-                    .opacity(0.6)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-            } else if !configured && !reviews.credentialStates.isEmpty {
-                Text("Add a Claude key or sign in to ChatGPT first.")
-                    .font(.system(size: 12))
-                    .opacity(0.6)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-            }
-            if let summary {
-                Divider()
-                Text(summary)
-                    .font(.system(size: 12))
-                    .opacity(0.8)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-            }
-            Divider()
-            AnnotationKindLegend(notes: versionNotes.filter { $0.status == .active })
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-            Divider()
-            if !versionNotes.isEmpty {
-                reviewMenuRow {
-                    showingReviewMenu = false
-                    clearReview()
-                } label: {
-                    Text("Clear Review (\(versionNotes.count == 1 ? "1 note" : "\(versionNotes.count) notes"))")
-                        .font(.system(size: 13))
-                    Spacer(minLength: 12)
-                }
-                .accessibilityIdentifier("clearReviewButton")
-                Divider()
-            }
-            reviewMenuRow {
-                showingReviewMenu = false
-                UserDefaults.standard.set("agents", forKey: "settingsPane")
-                if SettingsWindow.window == nil {
-                    SettingsWindow.toggle(openSettings)
-                }
-            } label: {
-                Text("Reviewers & Models…")
-                    .font(.system(size: 13))
-                Spacer(minLength: 12)
-            }
+        var footer: String?
+        if let runningReview {
+            footer = "\(runningReview.reviewerName) is reading \(runningReview.versionId)…"
+        } else if !configured && !reviews.credentialStates.isEmpty {
+            footer = "Add a Claude key or sign in to ChatGPT first."
         }
-        .frame(width: 260)
-        .background(popoverBackgroundColor)
-        .foregroundColor(popoverTextColor)
-        .task { await reviews.refreshCredentials() }
+        var sections = [
+            BarMenuSection(
+                id: "reviewers",
+                header: "Review \(version?.id ?? "v1") with",
+                note: "Sends this entry's text to the reviewer's provider.",
+                actions: reviewerProfiles.map { profile in
+                    BarMenuAction(
+                        id: "reviewWith-\(profile.id)",
+                        title: profile.name,
+                        dot: Color(nsColor: profile.color.nsColor),
+                        isEnabled: runningReview == nil
+                    ) { startReview(profile) }
+                },
+                footer: footer
+            ),
+        ]
+        if let summary {
+            sections.append(BarMenuSection(id: "summary", paragraph: summary))
+        }
+        sections.append(BarMenuSection(id: "legend", accessory: AnyView(
+            AnnotationKindLegend(notes: versionNotes.filter { $0.status == .active })
+        )))
+        if !versionNotes.isEmpty {
+            sections.append(BarMenuSection(id: "clear", actions: [
+                BarMenuAction(
+                    id: "clearReviewButton",
+                    title: "Clear Review (\(versionNotes.count == 1 ? "1 note" : "\(versionNotes.count) notes"))"
+                ) { clearReview() },
+            ]))
+        }
+        sections.append(BarMenuSection(id: "settings", actions: [
+            BarMenuAction(id: "reviewersAndModelsButton", title: "Reviewers & Models…") {
+                openReviewerSettings()
+            },
+        ]))
+        return BarMenuContent(width: 270, sections: sections)
+    }
+}
+
+// MARK: - Bar menus
+
+extension ContentView {
+    /// What `kind` shows right now; nil when it has nothing to show (e.g. no text entry).
+    private func barMenuContent(_ kind: BarMenuKind) -> BarMenuContent? {
+        switch kind {
+        case .versions:
+            guard let manifest = entryManifest else { return nil }
+            let versions = manifest.versions.reversed().map { version in
+                BarMenuAction(
+                    id: "versionRow-\(version.id)",
+                    title: version.id,
+                    detail: versionDetail(version, in: manifest),
+                    isChecked: version.id == displayedVersion?.id
+                ) { showVersion(version.id) }
+            }
+            return BarMenuContent(width: 270, sections: [
+                BarMenuSection(id: "versions", actions: versions),
+                BarMenuSection(id: "new", actions: [
+                    BarMenuAction(
+                        id: "newVersionButton",
+                        title: "New Version",
+                        detail: ShortcutStore.shortcut(for: .newVersion, in: shortcutsJSON)?.displayString
+                    ) { createNewVersion() },
+                ]),
+            ])
+        case .review:
+            guard selectedTextEntry != nil else { return nil }
+            return reviewMenuContent
+        case .voiceNotes:
+            let urls = displayedAudioURLs
+            guard !urls.isEmpty else { return nil }
+            return BarMenuContent(width: 220, sections: [
+                BarMenuSection(
+                    id: "notes",
+                    header: "Voice notes on \(displayedVersion?.id ?? "v1")",
+                    actions: urls.enumerated().map { index, url in
+                        BarMenuAction(
+                            id: "voiceNoteRow-\(index + 1)",
+                            title: "Voice note \(index + 1)",
+                            detail: index == urls.count - 1 ? "latest" : nil,
+                            isChecked: voicePlayer.url == url
+                        ) {
+                            if voicePlayer.url != url { toggleVoiceNote(url) }
+                        }
+                    }
+                ),
+            ])
+        case .videoPermission:
+            var sections: [BarMenuSection] = []
+            if let fallback = videoPermissionPopoverFallbackMessage {
+                sections.append(BarMenuSection(id: "fallback", paragraph: fallback))
+            }
+            for item in videoPermissionPopoverItems {
+                sections.append(BarMenuSection(id: "\(item.id)", paragraph: item.message, actions: [
+                    BarMenuAction(id: "openSettings-\(item.id)", title: item.buttonLabel, trailingSymbol: "arrow.up.forward") {
+                        openVideoPermissionSettings(item.settingsPane)
+                    },
+                ]))
+            }
+            return sections.isEmpty ? nil : BarMenuContent(width: 320, sections: sections)
+        case .microphonePermission:
+            return BarMenuContent(width: 320, sections: [
+                BarMenuSection(
+                    id: "microphone",
+                    paragraph: "Hey, we need microphone permission to record voice notes.",
+                    actions: [
+                        BarMenuAction(id: "openMicrophoneSettings", title: "Open Microphone Settings", trailingSymbol: "arrow.up.forward") {
+                            openVideoPermissionSettings("Privacy_Microphone")
+                        },
+                    ]
+                ),
+            ])
+        case .overflow:
+            let actions = barOverflow.filter(isBottomBarItemAvailable).flatMap { item in
+                [overflowAction(for: item)] + (item == .timer ? timerOverflowActions : [])
+            }
+            return actions.isEmpty ? nil : BarMenuContent(width: 250, sections: [BarMenuSection(id: "items", actions: actions)])
+        }
     }
 
-    private func reviewMenuRow<Label: View>(action: @escaping () -> Void, @ViewBuilder label: () -> Label) -> some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                label()
+    /// Where `kind` hangs from: its control, else the "…" button, else the right of the bar.
+    private func barMenuAnchors(_ kind: BarMenuKind) -> [BarMenuAnchor] {
+        switch kind {
+        case .versions: return [.item(.versions), .overflow]
+        case .review: return [.item(.review), .overflow]
+        case .voiceNotes: return [.voiceNotes]
+        case .videoPermission: return [.item(.recordVideo), .overflow]
+        case .microphonePermission: return [.item(.recordVoiceNote), .overflow]
+        case .overflow: return [.overflow]
+        }
+    }
+
+    private func showBarMenu(_ kind: BarMenuKind) {
+        barMenuHighlight = nil
+        withAnimation(.easeOut(duration: 0.15)) {
+            openBarMenu = kind
+            bottomNavOpacity = 1.0
+        }
+        installBarMenuKeyMonitor()
+    }
+
+    private func toggleBarMenu(_ kind: BarMenuKind) {
+        if openBarMenu == kind {
+            closeBarMenu()
+        } else {
+            showBarMenu(kind)
+        }
+    }
+
+    /// Closes the open menu (only if it's `kind`, when given).
+    private func closeBarMenu(_ kind: BarMenuKind? = nil) {
+        guard let open = openBarMenu, kind == nil || kind == open else { return }
+        withAnimation(.easeIn(duration: 0.15)) {
+            openBarMenu = nil
+        }
+        barMenuHighlight = nil
+        if let barMenuKeyMonitor {
+            NSEvent.removeMonitor(barMenuKeyMonitor)
+            self.barMenuKeyMonitor = nil
+        }
+        if let barMenuResignObserver {
+            NotificationCenter.default.removeObserver(barMenuResignObserver)
+            self.barMenuResignObserver = nil
+        }
+        barMenuWindow = nil
+    }
+
+    private func chooseBarMenuAction(_ action: BarMenuAction) {
+        guard action.isEnabled else { return }
+        closeBarMenu()
+        action.perform()
+    }
+
+    /// While a menu is open: Esc closes it, ↑/↓ move the highlight, ↩ chooses. Other keys
+    /// (except ⌘ shortcuts) are swallowed, like a native menu, so nothing is typed behind it.
+    private func installBarMenuKeyMonitor() {
+        guard barMenuKeyMonitor == nil else { return }
+        let window = NSApp.keyWindow
+        barMenuWindow = window
+        if let window {
+            barMenuResignObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { _ in
+                MainActor.assumeIsolated { closeBarMenu() }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .contentShape(Rectangle())
+        }
+        barMenuKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard let kind = openBarMenu,
+                  let barMenuWindow, event.window === barMenuWindow,
+                  !event.modifierFlags.contains(.command) else { return event }
+            guard let content = barMenuContent(kind) else {
+                closeBarMenu()
+                return event
+            }
+            switch event.keyCode {
+            case 53: // Esc
+                closeBarMenu()
+            case 125: // ↓
+                barMenuHighlight = content.action(after: barMenuHighlight, step: 1)?.id
+            case 126: // ↑
+                barMenuHighlight = content.action(after: barMenuHighlight, step: -1)?.id
+            case 36, 76: // ↩, enter
+                if let action = content.enabledActions.first(where: { $0.id == barMenuHighlight }) {
+                    chooseBarMenuAction(action)
+                }
+            default:
+                break
+            }
+            return nil
+        }
+    }
+
+    /// The open menu above its control; a click anywhere outside it closes it.
+    @ViewBuilder
+    private func barMenuOverlay(_ anchors: [BarMenuAnchor: Anchor<CGRect>]) -> some View {
+        GeometryReader { proxy in
+            if let kind = openBarMenu,
+               let content = barMenuContent(kind),
+               let anchor = (barMenuAnchors(kind) + [.barRight]).lazy.compactMap({ anchors[$0] }).first {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { closeBarMenu() }
+                    .accessibilityHidden(true)
+                BarMenuPlacement(anchor: proxy[anchor]) {
+                    BarMenuCard(
+                        content: content,
+                        isDark: colorScheme == .dark,
+                        highlighted: $barMenuHighlight,
+                        onChoose: chooseBarMenuAction
+                    )
+                }
+                .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 6)))
+                .id(kind)
+            }
+        }
+    }
+
+    // MARK: Overflow
+
+    /// Bar items that move into "…" first when the bar is too narrow. Settings and the version
+    /// menu always stay.
+    private static let overflowOrder: [BottomBarItem] = [
+        .fullscreen, .backspace, .newEntry, .timer, .recordVideo, .recordVoiceNote, .review, .lock, .history,
+    ]
+
+    private func overflowAction(for item: BottomBarItem) -> BarMenuAction {
+        let command: AppCommand? = switch item {
+        case .timer: .toggleTimer
+        case .recordVideo: .recordVideo
+        case .recordVoiceNote: .recordVoiceNote
+        case .review: .reviewEntry
+        case .backspace: .toggleBackspace
+        case .newEntry: .newEntry
+        case .history: .toggleHistory
+        case .versions: .newVersion
+        case .lock: .toggleNoteLock
+        case .fullscreen, .settings: nil
+        }
+        let title = switch item {
+        case .timer: timerIsRunning ? "Pause Timer" : "Start Timer"
+        case .review: "Review with…"
+        case .backspace: backspaceDisabled ? "Turn Backspace On" : "Turn Backspace Off"
+        case .fullscreen: isFullscreen ? "Exit Fullscreen" : "Fullscreen"
+        case .history: showingSidebar ? "Hide History" : "Show History"
+        case .lock: selectedTextEntry?.isLocked == true ? "Unlock Note…" : "Lock Note"
+        default: item.title
+        }
+        let detail = item == .timer ? timerButtonTitle : command.flatMap { ShortcutStore.shortcut(for: $0, in: shortcutsJSON)?.displayString }
+        let isEnabled = item != .lock || (selectedTextEntry != nil && !storage.isTransferring)
+        return BarMenuAction(id: "overflow-\(item.rawValue)", title: title, detail: detail, isEnabled: isEnabled) {
+            switch item {
+            case .fullscreen:
+                NSApplication.shared.windows.first?.toggleFullScreen(nil)
+            case .settings:
+                SettingsWindow.toggle(openSettings)
+            default:
+                if let command { handle(command) }
+            }
+        }
+    }
+
+    /// What the bar's timer does besides start/pause (double-click resets, scrolling changes the
+    /// length), so it isn't lost when the timer is in "…". ±5 minutes exactly, within 0…45.
+    private var timerOverflowActions: [BarMenuAction] {
+        let maximum = 45 * 60
+        return [
+            BarMenuAction(id: "overflow-timer-reset", title: "Reset Timer", detail: "\(sessionMinutes):00") {
+                timeRemaining = sessionMinutes * 60
+                timerIsRunning = false
+            },
+            BarMenuAction(id: "overflow-timer-longer", title: "Add 5 Minutes", isEnabled: timeRemaining < maximum) {
+                timeRemaining = min(timeRemaining + 300, maximum)
+            },
+            BarMenuAction(id: "overflow-timer-shorter", title: "Remove 5 Minutes", isEnabled: timeRemaining > 0) {
+                timeRemaining = max(timeRemaining - 300, 0)
+            },
+        ]
+    }
+
+    private func overflowButton(items: [BottomBarItem], textColor: Color, textHoverColor: Color) -> some View {
+        Button(action: {
+            barOverflow = items
+            toggleBarMenu(.overflow)
+        }) {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 13, weight: .medium))
+                .frame(width: 16, height: 14)
+                .foregroundColor(isHoveringOverflow || openBarMenu == .overflow ? textHoverColor : textColor)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("More")
+        .accessibilityIdentifier("bottomBarOverflowButton")
+        .help("More")
         .onHover { hovering in
-            if hovering {
-                NSCursor.pointingHand.push()
-            } else {
-                NSCursor.pop()
-            }
+            isHoveringOverflow = hovering
+            hoverCursor(hovering)
         }
+        // The open menu follows the bar as it gets wider or narrower.
+        .onAppear { barOverflow = items }
+        .onChange(of: items) { barOverflow = items }
+        .onDisappear { closeBarMenu(.overflow) }
+        .barMenuAnchor(.overflow)
     }
 }
 
