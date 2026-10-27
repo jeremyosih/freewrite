@@ -39,9 +39,6 @@ struct Annotation: Codable, Equatable, Identifiable, Sendable {
         case dismissed
     }
 
-    /// The kinds a reviewer can choose from; anything else is stored as given.
-    static let kinds = ["observation", "question", "suggestion", "praise"]
-
     let id: String
     let entryId: String
     let versionId: String
@@ -52,6 +49,80 @@ struct Annotation: Codable, Equatable, Identifiable, Sendable {
     var kind: String
     var status: Status
     let createdAt: Date
+
+    /// `kind` as one of the fixed kinds (older files may hold other words).
+    var resolvedKind: AnnotationKind { AnnotationKind.resolve(kind) }
+}
+
+/// What a note is about. Each kind has its own highlight colour in the editor; reviewers
+/// pick one per note from the kinds their profile allows.
+enum AnnotationKind: String, Codable, CaseIterable, Identifiable, Sendable {
+    /// Spelling, grammar and typos.
+    case grammar
+    /// Vague, tangled or wordy passages.
+    case clarity
+    /// Order, repetition, where the piece starts, jumps in the thread.
+    case structure
+    /// A pattern, feeling or theme noticed in the writing.
+    case insight
+    /// An open question to write about next.
+    case question
+    /// What works and is worth keeping.
+    case praise
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .grammar: return "Grammar"
+        case .clarity: return "Clarity"
+        case .structure: return "Structure"
+        case .insight: return "Insight"
+        case .question: return "Question"
+        case .praise: return "Praise"
+        }
+    }
+
+    /// One line for the model and for Settings.
+    var guidance: String {
+        switch self {
+        case .grammar: return "a spelling, grammar or typo mistake; say what's wrong in a few words"
+        case .clarity: return "a vague, tangled or wordy passage that hides the idea"
+        case .structure: return "order, repetition, a buried opening or a jump in the thread"
+        case .insight: return "a pattern, feeling or theme you notice in the writing"
+        case .question: return "an open question the writer could explore next"
+        case .praise: return "something that works and is worth keeping"
+        }
+    }
+
+    /// Older and looser words for each kind; `resolve` maps them here.
+    private static let aliases: [String: AnnotationKind] = [
+        "spelling": .grammar, "typo": .grammar, "grammar mistake": .grammar, "punctuation": .grammar,
+        "suggestion": .clarity, "wording": .clarity, "style": .clarity, "word choice": .clarity,
+        "flow": .structure, "order": .structure, "repetition": .structure,
+        "observation": .insight, "pattern": .insight, "theme": .insight, "feeling": .insight,
+        "prompt": .question,
+        "strength": .praise, "encouragement": .praise,
+    ]
+
+    /// The kind a word names (case and surrounding spaces ignored, aliases accepted), or nil.
+    static func parse(_ raw: String?) -> AnnotationKind? {
+        guard let word = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !word.isEmpty else { return nil }
+        return AnnotationKind(rawValue: word) ?? aliases[word]
+    }
+
+    /// Like `parse`, falling back to `insight` (the plain highlighter) for anything unknown,
+    /// so every stored note still shows.
+    static func resolve(_ raw: String?) -> AnnotationKind {
+        parse(raw) ?? .insight
+    }
+
+    /// `kinds` in their canonical order, without repeats; all kinds when it's empty.
+    static func normalized(_ kinds: [AnnotationKind]) -> [AnnotationKind] {
+        let set = Set(kinds)
+        let ordered = allCases.filter(set.contains)
+        return ordered.isEmpty ? allCases : ordered
+    }
 }
 
 /// Reads and writes `annotations.json` for the entries in one folder.

@@ -171,6 +171,10 @@ struct ReviewRunContext: Codable, Equatable, Sendable {
     var runId: String
     var scope: ReviewerProfile.Scope
     var summary: String?
+    /// Kinds the reviewer may use (nil: all, for runs stored before kinds existed).
+    var kinds: [AnnotationKind]? = nil
+    /// Kind used when a note doesn't name one.
+    var defaultKind: AnnotationKind? = nil
 }
 
 struct ReviewActivity: Equatable, Sendable {
@@ -237,6 +241,28 @@ struct ReviewToolbox {
     static let readLimit = 20_000
 
     var annotations: AnnotationStore { AnnotationStore(versionStore: versionStore) }
+
+    /// The kinds this run's reviewer may use, in canonical order.
+    var allowedKinds: [AnnotationKind] { AnnotationKind.normalized(run.kinds ?? AnnotationKind.allCases) }
+
+    var defaultKind: AnnotationKind {
+        let preferred = run.defaultKind ?? .insight
+        return allowedKinds.contains(preferred) ? preferred : (allowedKinds.first ?? .insight)
+    }
+
+    /// The kind a tool call asked for, if it names one this reviewer may use. Otherwise nil and a
+    /// line telling the model what happened (an empty word is not a mistake: no line).
+    func allowedKind(_ raw: String?) -> (kind: AnnotationKind?, problem: String?) {
+        guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return (nil, nil) }
+        let allowed = allowedKinds.map(\.rawValue).joined(separator: ", ")
+        guard let kind = AnnotationKind.parse(raw) else {
+            return (nil, "\"\(raw)\" isn't a kind (use one of: \(allowed))")
+        }
+        guard allowedKinds.contains(kind) else {
+            return (nil, "you can't leave \(kind.rawValue) notes (use one of: \(allowed))")
+        }
+        return (kind, nil)
+    }
 
     private var manifest: EntryManifest { versionStore.manifest(for: run.entryFilename) }
 
@@ -345,30 +371,36 @@ struct ReviewToolbox {
         case .success(let found): anchor = found
         case .failure(let failure): throw ReviewToolFailure(failure.localizedDescription)
         }
-        let kind = new.kind?.lowercased().trimmingCharacters(in: .whitespaces)
+        let requested = allowedKind(new.kind)
+        let kind = requested.kind ?? defaultKind
         let annotation = Annotation(
             id: id, entryId: run.entryId, versionId: versionId, reviewerId: run.reviewerId, runId: run.runId,
-            anchor: anchor, comment: comment, kind: (kind?.isEmpty == false ? kind : nil) ?? "observation",
+            anchor: anchor, comment: comment, kind: kind.rawValue,
             status: .active, createdAt: now()
         )
         try mutate { annotations in
             guard !annotations.contains(where: { $0.id == id }) else { return }
             annotations.append(annotation)
         }
-        return "Added \(id) on \(versionId) at \(anchor.start)–\(anchor.end): \"\(anchor.quote)\""
+        let added = "Added \(id) (\(kind.rawValue)) on \(versionId) at \(anchor.start)–\(anchor.end): \"\(anchor.quote)\""
+        guard let problem = requested.problem else { return added }
+        return added + "\nNote: \(problem); it was saved as \(kind.rawValue). Change it with update_annotation if another kind fits."
     }
 
     func updateAnnotation(id: String, comment: String?, kind: String?) throws -> String {
+        let requested = allowedKind(kind)
+        let newKind = requested.kind
         try mutate { annotations in
             let index = try ownIndex(of: id, in: annotations)
             if let comment = comment?.trimmingCharacters(in: .whitespacesAndNewlines), !comment.isEmpty {
                 annotations[index].comment = comment
             }
-            if let kind = kind?.trimmingCharacters(in: .whitespaces), !kind.isEmpty {
-                annotations[index].kind = kind.lowercased()
+            if let newKind {
+                annotations[index].kind = newKind.rawValue
             }
         }
-        return "Updated \(id)."
+        guard let problem = requested.problem else { return "Updated \(id)." }
+        return "Updated \(id), but kept its kind: \(problem)."
     }
 
     func removeAnnotation(id: String) throws -> String {
@@ -436,6 +468,8 @@ struct ReviewToolbox {
         } else {
             lines += ["", "The text is long: read it with read_version in slices."]
         }
+        lines += ["", "Kinds you may use (pass one as kind on every note; default \(defaultKind.rawValue)):"]
+        lines += allowedKinds.map { "- \($0.rawValue): \($0.guidance)" }
         if let existing = try? loadAnnotations().filter({ $0.versionId == run.versionId }), !existing.isEmpty {
             lines += ["", "This version already has \(existing.count) annotation(s); check list_annotations and don't repeat them (dismissed ones were unwanted)."]
         }
@@ -462,8 +496,9 @@ final class ReviewService: ObservableObject {
     fast and unfiltered (stream of consciousness), sometimes by voice. You read one entry and leave short \
     margin notes anchored to exact passages. The person reads them later by hovering the highlighted text.
 
-    - Annotate, never rewrite. Don't produce a new version of the text, and don't correct spelling or grammar \
-    unless your instructions ask for it.
+    - Annotate, never rewrite. Don't produce a new version of the text. Point out spelling or grammar \
+    mistakes only if you may use the grammar kind.
+    - Give every note a kind from the ones the brief lists for you; each kind shows in its own colour.
     - Anchor every note to a quote copied exactly from the version text: a short passage (a phrase or one \
     sentence, rarely more) with the same words, punctuation and case. No ellipses, no paraphrase. If a quote \
     appears more than once, pass a prefix or suffix (the words right before or after it).
@@ -757,7 +792,8 @@ final class ReviewService: ObservableObject {
         let count = try await harness.update(Self.runCounter, key: key) { $0.count += 1 }.count
         let run = ReviewRunContext(
             entryFilename: entryFilename, entryId: entryId.uuidString, versionId: versionId,
-            reviewerId: profile.id, reviewerName: profile.name, runId: "review:\(key):\(count)", scope: profile.scope)
+            reviewerId: profile.id, reviewerName: profile.name, runId: "review:\(key):\(count)", scope: profile.scope,
+            kinds: profile.kinds, defaultKind: profile.effectiveDefaultKind)
         binding.runId = run.runId
 
         let agent = AgentChange(
@@ -855,7 +891,11 @@ final class ReviewService: ObservableObject {
     }
 
     private func makeTools() -> [Tool] {
-        let kinds = JSONSchema.string("observation, question, suggestion or praise (default observation)", enum: Annotation.kinds)
+        // No `enum`: the tool checks the word itself, so an unknown or disallowed kind still saves
+        // the note (as the reviewer's default kind) and tells the model, instead of losing it.
+        let kinds = JSONSchema.string(
+            "What the note is about, one of: " + AnnotationKind.allCases.map { "\($0.rawValue) (\($0.guidance))" }.joined(separator: "; ")
+                + ". Use only the kinds the brief lists for you; without one, your default kind is used.")
         return [
             Tool("list_versions", description: "Lists the entry's versions, oldest first, with dates, word counts and which one you are reviewing.",
                  replay: .safe) { [weak self] context in

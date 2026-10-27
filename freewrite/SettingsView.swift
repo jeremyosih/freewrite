@@ -305,16 +305,16 @@ struct FreewriteCommands: Commands {
 
 // MARK: - Settings window
 
-/// One page of the Settings window. Adding a page = a case here (title, icon, tint, group)
+/// One page of the Settings window. Adding a page = a case here (title, icon, group)
 /// plus its view in `SettingsView.pane(_:)`.
 enum SettingsPane: String, CaseIterable, Identifiable {
     case general
     case recording
     case storage
     case permissions
+    case privacy
     case agents
     case bottomBar
-    case privacy
     case shortcuts
     case about
 
@@ -357,51 +357,29 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         }
     }
 
+    /// A plain outline SF Symbol, drawn in the sidebar's secondary colour.
     var systemImage: String {
         switch self {
-        case .general: return "gearshape.fill"
-        case .recording: return "record.circle"
-        case .storage: return "internaldrive.fill"
-        case .permissions: return "hand.raised.fill"
+        case .general: return "gearshape"
+        case .recording: return "waveform"
+        case .storage: return "internaldrive"
+        case .permissions: return "hand.raised"
         case .bottomBar: return "dock.rectangle"
         case .agents: return "sparkles"
-        case .privacy: return "lock.fill"
+        case .privacy: return "lock"
         case .shortcuts: return "command"
-        case .about: return "info"
-        }
-    }
-
-    var tint: Color {
-        switch self {
-        case .general: return .gray
-        case .recording: return .red
-        case .storage: return .blue
-        case .permissions: return .green
-        case .bottomBar: return .indigo
-        case .agents: return .purple
-        case .privacy: return .blue
-        case .shortcuts: return .orange
-        case .about: return .gray
+        case .about: return "info.circle"
         }
     }
 }
 
-/// A white SF Symbol on a coloured rounded square, like System Settings.
-struct SettingsIconTile: View {
-    let systemImage: String
-    let tint: Color
-    var size: CGFloat = 20
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
-            .fill(tint.gradient)
-            .frame(width: size, height: size)
-            .overlay {
-                Image(systemName: systemImage)
-                    .font(.system(size: size * 0.55, weight: .semibold))
-                    .foregroundStyle(.white)
-            }
-            .accessibilityHidden(true)
+/// "Version 1.2 (34)" from the bundle.
+enum AppVersion {
+    static var display: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "Version \(short) (\(build))"
     }
 }
 
@@ -423,26 +401,32 @@ struct SettingsView: View {
                     }
                 }
             }
-            .navigationSplitViewColumnWidth(190)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                Text(AppVersion.display)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 12)
+                    .accessibilityIdentifier("settingsVersion")
+            }
+            .navigationSplitViewColumnWidth(180)
             .toolbar(removing: .sidebarToggle)
         } detail: {
-            pane(selectedPane)
-                .navigationTitle(selectedPane.title)
-                .toolbar(removing: .title)
-                .toolbar {
-                    ToolbarItem(placement: .navigation) {
-                        HStack(spacing: 8) {
-                            SettingsIconTile(systemImage: selectedPane.systemImage, tint: selectedPane.tint, size: 22)
-                            Text(selectedPane.title)
-                                .font(.title3.weight(.semibold))
-                        }
-                        .accessibilityElement(children: .combine)
-                        .accessibilityAddTraits(.isHeader)
-                    }
-                    .sharedBackgroundVisibility(.hidden)
-                }
+            VStack(alignment: .leading, spacing: 0) {
+                Text(selectedPane.title)
+                    .font(.title2.weight(.semibold))
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 2)
+                    .accessibilityAddTraits(.isHeader)
+                pane(selectedPane)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
+            .navigationTitle(selectedPane.title)
+            .toolbar(removing: .title)
         }
-        .frame(width: 720, height: 540)
+        .frame(width: 760, height: 560)
     }
 
     private func rows(_ panes: [SettingsPane]) -> some View {
@@ -450,7 +434,8 @@ struct SettingsView: View {
             Label {
                 Text(pane.title)
             } icon: {
-                SettingsIconTile(systemImage: pane.systemImage, tint: pane.tint)
+                Image(systemName: pane.systemImage)
+                    .foregroundStyle(.secondary)
             }
             .tag(pane)
             .accessibilityIdentifier("settingsPane-\(pane.rawValue)")
@@ -484,7 +469,7 @@ private struct GeneralSettingsView: View {
     var body: some View {
         Form {
             Section("Text") {
-                Picker("Font", selection: $fontName) {
+                Picker(selection: $fontName) {
                     ForEach(WritingFont.presets, id: \.name) { preset in
                         Text(preset.label).tag(preset.name)
                     }
@@ -496,12 +481,18 @@ private struct GeneralSettingsView: View {
                     if !allFamilies.contains(fontName) && !WritingFont.presets.contains(where: { $0.name == fontName }) {
                         Text(fontName).tag(fontName)
                     }
+                } label: {
+                    Text("Font")
+                    Text("The typeface of the writing page")
                 }
 
-                Picker("Size", selection: $fontSize) {
+                Picker(selection: $fontSize) {
                     ForEach(WritingFont.sizes, id: \.self) { size in
                         Text("\(Int(size)) px").tag(size)
                     }
+                } label: {
+                    Text("Size")
+                    Text("Bigger Text and Smaller Text in the Write menu change it too")
                 }
 
                 Text("The quick brown fox jumps over the lazy dog.")
@@ -526,24 +517,147 @@ private struct GeneralSettingsView: View {
             }
 
             Section("Appearance") {
-                Picker("Theme", selection: $colorScheme) {
+                Picker(selection: $colorScheme) {
                     Text("Light").tag("light")
                     Text("Dark").tag("dark")
+                } label: {
+                    Text("Theme")
+                    Text("The writing window's colours")
                 }
                 .pickerStyle(.segmented)
             }
 
-            Section {
-                Stepper(value: $sessionMinutes, in: 5...45, step: 5) {
-                    Text("Timer length: \(sessionMinutes) min")
+            Section("Session") {
+                LabeledContent {
+                    HStack(spacing: 6) {
+                        Text("\(sessionMinutes) min")
+                            .monospacedDigit()
+                        Stepper("Timer length", value: $sessionMinutes, in: 5...45, step: 5)
+                            .labelsHidden()
+                    }
+                } label: {
+                    Text("Timer length")
+                    Text("Scroll over the timer in the bottom bar to adjust it while you write")
                 }
-            } header: {
-                Text("Session")
-            } footer: {
-                SettingsFootnote("Scroll over the timer in the bottom bar to adjust it while you write.")
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// A rounded group of rows separated by hairlines, like a grouped Form section, for panes that
+/// lay out their own columns (Settings › Agents).
+struct SettingsCard<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Group(subviews: content) { rows in
+                ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                    if index > 0 {
+                        Divider().padding(.leading, 12)
+                    }
+                    row
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                }
+            }
+        }
+        .settingsCardBackground()
+    }
+}
+
+/// A card row: title (+ optional secondary subtitle) on the left, the control on the right.
+struct SettingsCardRow<Label: View, Control: View>: View {
+    private let label: Label
+    private let control: Control
+
+    init(@ViewBuilder label: () -> Label, @ViewBuilder control: () -> Control) {
+        self.label = label()
+        self.control = control()
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Group(subviews: label) { parts in
+                    ForEach(Array(parts.enumerated()), id: \.element.id) { index, part in
+                        if index == 0 {
+                            part.font(.system(size: 13))
+                        } else {
+                            part
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            control
+        }
+        .frame(minHeight: 22)
+    }
+}
+
+extension SettingsCardRow where Label == SettingsRowTitle {
+    init(_ title: String, subtitle: String? = nil, @ViewBuilder control: () -> Control) {
+        self.init(label: { SettingsRowTitle(title: title, subtitle: subtitle) }, control: control)
+    }
+}
+
+/// Title and optional subtitle as separate rows for `SettingsCardRow` to style.
+struct SettingsRowTitle: View {
+    let title: String
+    let subtitle: String?
+
+    var body: some View {
+        Text(title)
+        if let subtitle {
+            Text(subtitle)
+        }
+    }
+}
+
+/// A small section label above a `SettingsCard`, with optional detail text on the right.
+struct SettingsSectionHeader: View {
+    private let title: String
+    private let detail: String?
+
+    init(_ title: String, detail: String? = nil) {
+        self.title = title
+        self.detail = detail
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .accessibilityAddTraits(.isHeader)
+            Spacer()
+            if let detail {
+                Text(detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.top, 8)
+    }
+}
+
+extension View {
+    /// The fill and hairline of a grouped Form section.
+    func settingsCardBackground() -> some View {
+        background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.035))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+        )
     }
 }
 

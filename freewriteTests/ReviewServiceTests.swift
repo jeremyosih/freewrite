@@ -73,6 +73,7 @@ struct ReviewServiceTests {
         #expect(note.entryId == entryId.uuidString)
         #expect(note.runId == "review:\(entryId.uuidString):v1:mirror:1")
         #expect(note.status == .active)
+        #expect(note.kind == "insight")  // "observation" is an older word for insight
 
         // A second run gets the next run number.
         try await faux.append(.toolCall("finish_review", ["summary": "Nothing new."]))

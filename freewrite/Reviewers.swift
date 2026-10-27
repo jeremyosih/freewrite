@@ -26,8 +26,42 @@ enum ReviewerColor: String, Codable, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    /// Background behind annotated text: light enough to read through in both themes.
-    var highlightColor: NSColor { nsColor.withAlphaComponent(0.28) }
+}
+
+extension AnnotationKind {
+    /// The kind's colour at full strength (legend swatches, the dot in a note's popover).
+    var nsColor: NSColor {
+        switch self {
+        case .grammar: return .systemRed
+        case .clarity: return .systemBlue
+        case .structure: return .systemPurple
+        case .insight: return .systemYellow
+        case .question: return .systemTeal
+        case .praise: return .systemGreen
+        }
+    }
+
+    /// Background behind annotated text: a soft tint that keeps the text readable, a little
+    /// stronger in dark mode where tints wash out. Grammar stays faint: its underline carries it.
+    var highlightColor: NSColor {
+        let base = nsColor
+        let light: CGFloat
+        let dark: CGFloat
+        switch self {
+        case .grammar: (light, dark) = (0.14, 0.24)
+        case .insight: (light, dark) = (0.32, 0.30)
+        default: (light, dark) = (0.20, 0.32)
+        }
+        return NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            return base.withAlphaComponent(isDark ? dark : light)
+        }
+    }
+
+    /// Grammar notes get a squiggly underline, like a spelling mark; the others only a tint.
+    var underlineColor: NSColor? {
+        self == .grammar ? nsColor : nil
+    }
 }
 
 struct ReviewerProfile: Codable, Equatable, Identifiable, Sendable {
@@ -46,13 +80,21 @@ struct ReviewerProfile: Codable, Equatable, Identifiable, Sendable {
     var model: String
     /// A PiDurableKit thinking level ("low", "high", …), or nil for the model's default.
     var thinkingLevel: String?
+    /// The reviewer's own colour (its dot in lists and menus); highlights are coloured by kind.
     var color: ReviewerColor
     var scope: Scope
     var autoRunOnNewVersion: Bool
+    /// Kinds of note this reviewer may leave, in canonical order (never empty).
+    var kinds: [AnnotationKind] {
+        didSet { kinds = AnnotationKind.normalized(kinds) }
+    }
+    /// The kind used when the model doesn't pick one. Always one of `kinds` (see `effectiveDefaultKind`).
+    var defaultKind: AnnotationKind
 
     init(
         id: String = UUID().uuidString, name: String, instructions: String, model: String = "",
-        thinkingLevel: String? = nil, color: ReviewerColor, scope: Scope = .latest, autoRunOnNewVersion: Bool = false
+        thinkingLevel: String? = nil, color: ReviewerColor, scope: Scope = .latest, autoRunOnNewVersion: Bool = false,
+        kinds: [AnnotationKind]? = nil, defaultKind: AnnotationKind? = nil
     ) {
         self.id = id
         self.name = name
@@ -62,6 +104,34 @@ struct ReviewerProfile: Codable, Equatable, Identifiable, Sendable {
         self.color = color
         self.scope = scope
         self.autoRunOnNewVersion = autoRunOnNewVersion
+        let kinds = AnnotationKind.normalized(kinds ?? Self.defaultKinds(forId: id))
+        self.kinds = kinds
+        self.defaultKind = defaultKind ?? Self.defaultDefaultKind(forId: id, kinds: kinds)
+    }
+
+    /// `defaultKind` if it's allowed, else the first allowed kind.
+    var effectiveDefaultKind: AnnotationKind {
+        kinds.contains(defaultKind) ? defaultKind : (kinds.first ?? .insight)
+    }
+
+    /// Kinds for profiles saved before kinds existed: the built-in reviewers get theirs, others all.
+    static func defaultKinds(forId id: String) -> [AnnotationKind] {
+        switch id {
+        case "editor": return [.grammar, .clarity, .structure]
+        case "mirror": return [.insight, .question]
+        case "coach": return [.question, .praise]
+        default: return AnnotationKind.allCases
+        }
+    }
+
+    private static func defaultDefaultKind(forId id: String, kinds: [AnnotationKind]) -> AnnotationKind {
+        let preferred: AnnotationKind
+        switch id {
+        case "editor": preferred = .clarity
+        case "coach": preferred = .question
+        default: preferred = .insight
+        }
+        return kinds.contains(preferred) ? preferred : (kinds.first ?? .insight)
     }
 
     init(from decoder: Decoder) throws {
@@ -74,6 +144,12 @@ struct ReviewerProfile: Codable, Equatable, Identifiable, Sendable {
         color = (try? container.decode(ReviewerColor.self, forKey: .color)) ?? .yellow
         scope = (try? container.decode(Scope.self, forKey: .scope)) ?? .latest
         autoRunOnNewVersion = try container.decodeIfPresent(Bool.self, forKey: .autoRunOnNewVersion) ?? false
+        // Unknown kind names (from a newer build) are skipped rather than failing the whole list.
+        let storedKinds = (try? container.decodeIfPresent([String].self, forKey: .kinds))?.compactMap(AnnotationKind.parse)
+        let kinds = AnnotationKind.normalized(storedKinds ?? Self.defaultKinds(forId: id))
+        self.kinds = kinds
+        defaultKind = (try? container.decodeIfPresent(String.self, forKey: .defaultKind)).flatMap(AnnotationKind.parse)
+            ?? Self.defaultDefaultKind(forId: id, kinds: kinds)
     }
 
     static let defaults: [ReviewerProfile] = [
@@ -99,8 +175,9 @@ struct ReviewerProfile: Codable, Equatable, Identifiable, Sendable {
             voice. Point to the sentences where the real idea is (often buried mid-paragraph), passages that \
             repeat themselves, places where the thread jumps and the reader gets lost, and vague words that \
             hide a sharper one. Suggest the move ("this could open the piece", "cut the first half of this \
-            paragraph"), never the rewrite. Ignore typos and grammar unless they change the meaning: this is \
-            stream-of-consciousness writing. At most one note per paragraph.
+            paragraph"), never the rewrite. At most one such note per paragraph. Separately, mark real spelling and grammar \
+            mistakes as grammar notes, one per mistake, saying what's wrong in a few words; skip the loose, \
+            spoken style of stream-of-consciousness writing, which is not a mistake.
             """,
             color: .blue
         ),

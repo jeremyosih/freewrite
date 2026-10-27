@@ -178,6 +178,11 @@ struct EditorHighlight: Identifiable, Equatable {
     var range: NSRange
     let color: NSColor
     let comment: String
+    /// Shown above the comment (e.g. "Grammar · Editor"), with a dot in `titleColor`.
+    var title: String? = nil
+    var titleColor: NSColor? = nil
+    /// Draws a squiggly underline in this colour as well as the tint.
+    var underlineColor: NSColor? = nil
 }
 
 extension EditorHighlight {

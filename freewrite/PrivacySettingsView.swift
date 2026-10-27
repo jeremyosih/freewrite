@@ -20,14 +20,23 @@ struct PrivacySettingsView: View {
 
     private var lockedCount: Int { storage.versionStore.lockedEntryFilenames().count }
 
+    private var lockShortcut: String {
+        ShortcutStore.shortcut(for: .toggleNoteLock, in: UserDefaults.standard.string(forKey: SettingsKey.shortcuts) ?? "{}")?.displayString
+            ?? "its shortcut"
+    }
+
     var body: some View {
         Form {
             Section {
-                LabeledContent("Locked notes") {
+                LabeledContent {
                     Text(lockedCount == 1 ? "1 in this folder" : "\(lockedCount) in this folder")
+                        .monospacedDigit()
                         .accessibilityIdentifier("lockedNoteCount")
+                } label: {
+                    Text("Locked notes")
+                    Text("Lock one from History, the bottom bar or \(lockShortcut)")
                 }
-                LabeledContent("Right now") {
+                LabeledContent {
                     HStack {
                         Text(noteLock.isUnlocked ? "Open" : "Locked")
                             .foregroundStyle(.secondary)
@@ -35,35 +44,52 @@ struct PrivacySettingsView: View {
                             Button("Lock Now") { noteLock.lock() }
                         }
                     }
+                } label: {
+                    Text("Right now")
+                    Text("Opening one asks for Touch ID, your Apple Watch or your password")
                 }
-                Picker("Require Touch ID again after", selection: $timeoutMinutes) {
+                Picker(selection: $timeoutMinutes) {
                     ForEach(NoteLockSession.timeoutChoices, id: \.self) { minutes in
-                        Text(minutes == 0 ? "Only when the Mac sleeps" : "\(minutes) min of inactivity").tag(minutes)
+                        Text(minutes == 0 ? "Only when the Mac sleeps" : "After \(minutes) min").tag(minutes)
                     }
+                } label: {
+                    Text("Close again")
+                    Text("Without using Freewrite; always when the Mac sleeps or locks")
                 }
                 .accessibilityIdentifier("noteLockTimeoutPicker")
             } header: {
                 Text("Locked Notes")
-            } footer: {
-                Text("Lock a note by right-clicking it in History, with the lock in the bottom bar, or with \(ShortcutStore.shortcut(for: .toggleNoteLock, in: UserDefaults.standard.string(forKey: SettingsKey.shortcuts) ?? "{}")?.displayString ?? "its shortcut"). Opening one asks for Touch ID, your Apple Watch or your Mac password once; locked notes close again after that much time without using Freewrite, and whenever the Mac sleeps or its screen locks.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             Section {
-                HStack {
-                    Button("Show Recovery Key…") { showRecoveryKey() }
-                        .accessibilityIdentifier("showRecoveryKeyButton")
-                    Button("Create New Recovery Key…") { replaceRecoveryKey() }
-                    Spacer()
-                    if isWorking {
-                        ProgressView().controlSize(.small)
+                LabeledContent {
+                    HStack {
+                        if isWorking {
+                            ProgressView().controlSize(.small)
+                        }
+                        Button("Show…") { showRecoveryKey() }
+                            .accessibilityIdentifier("showRecoveryKeyButton")
                     }
+                    .disabled(!noteLock.hasVault || isWorking)
+                } label: {
+                    Text("Recovery key")
+                    Text(noteLock.hasVault ? "Opens your locked notes on another Mac" : "You'll get one the first time you lock a note")
                 }
-                .disabled(!noteLock.hasVault || isWorking)
-                Button("Unlock with Recovery Key…") { showingRecoveryEntry = true }
-                    .disabled(isWorking || !noteLock.isAvailable)
-                    .accessibilityIdentifier("unlockWithRecoveryKeyButton")
+                LabeledContent {
+                    Button("Create…") { replaceRecoveryKey() }
+                        .disabled(!noteLock.hasVault || isWorking)
+                } label: {
+                    Text("New recovery key")
+                    Text("Rewrites this folder's locked notes for the new key")
+                }
+                LabeledContent {
+                    Button("Unlock…") { showingRecoveryEntry = true }
+                        .disabled(isWorking || !noteLock.isAvailable)
+                        .accessibilityIdentifier("unlockWithRecoveryKeyButton")
+                } label: {
+                    Text("Notes from another Mac")
+                    Text("Enter its recovery key once; after that Touch ID opens them")
+                }
                 if let message {
                     Text(message)
                         .font(.callout)
@@ -72,17 +98,14 @@ struct PrivacySettingsView: View {
             } header: {
                 Text("Recovery Key")
             } footer: {
-                Text(noteLock.hasVault
-                     ? "The recovery key is the only way to open your locked notes on another Mac (for example through iCloud Drive), or on this one if its Touch ID key is lost, e.g. after erasing the Mac. Freewrite can't recover it for you. Use Unlock with Recovery Key on the other Mac once; after that it opens them with its own Touch ID."
-                     : "You'll get a recovery key the first time you lock a note. If your locked notes come from another Mac, use Unlock with Recovery Key once.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                SettingsFootnote("The recovery key is the only way to open locked notes on another Mac, or on this one if its Touch ID key is lost (e.g. after erasing the Mac). Freewrite can't recover it for you.")
             }
 
             Section {
                 Text("Locked notes, their versions, voice notes and transcripts are encrypted (AES-256) in your entries folder, so other apps, sync services and anyone who copies the folder can't read them. Only dates and the number of versions stay visible. Copies made before you locked a note can still hold its plain text: Time Machine backups, iCloud Drive versions, other folders, and deleted files that linger on the disk. Turn on FileVault to protect those too. While a note is open, its text is in Freewrite's memory. Video entries can't be locked yet.")
-                    .font(.caption)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let vaultError = noteLock.vaultError {
                     Text(vaultError)
                         .font(.caption)

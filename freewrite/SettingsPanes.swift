@@ -32,7 +32,7 @@ struct RecordingSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Picker("Microphone", selection: $microphoneID) {
+                Picker(selection: $microphoneID) {
                     Text("System default").tag("")
                     if !devices.isEmpty {
                         Divider()
@@ -43,28 +43,37 @@ struct RecordingSettingsView: View {
                     if !microphoneID.isEmpty && !devices.contains(where: { $0.id == microphoneID }) {
                         Text("Disconnected microphone").tag(microphoneID)
                     }
+                } label: {
+                    Text("Microphone")
+                    Text("Voice notes and the sound of videos")
                 }
                 .accessibilityIdentifier("microphonePicker")
 
-                LabeledContent("Input level") {
+                LabeledContent {
                     InputLevelMeter(microphoneID: microphoneID)
+                } label: {
+                    Text("Input level")
+                    Text("Live, while this pane is open")
                 }
             } footer: {
                 SettingsFootnote("Used for voice notes and the sound of video entries. If the chosen microphone isn't connected, the system default is used.")
             }
 
             Section {
-                Picker("Transcription", selection: $engine) {
+                Picker(selection: $engine) {
                     ForEach(TranscriptionEngine.allCases) { engine in
                         Text(engine.title).tag(engine.rawValue)
                     }
+                } label: {
+                    Text("Transcription")
+                    Text("Turns videos and voice notes into text")
                 }
                 .accessibilityIdentifier("transcriptionEnginePicker")
 
                 if engine == TranscriptionEngine.hex.rawValue {
                     hexRows
                 } else {
-                    Picker("Language", selection: $appleLanguage) {
+                    Picker(selection: $appleLanguage) {
                         Text("Automatic").tag("")
                         Divider()
                         ForEach(appleLanguages, id: \.id) { language in
@@ -73,6 +82,9 @@ struct RecordingSettingsView: View {
                         if !appleLanguage.isEmpty && !appleLanguages.contains(where: { $0.id == appleLanguage }) {
                             Text(appleLanguage).tag(appleLanguage)
                         }
+                    } label: {
+                        Text("Language")
+                        Text("Automatic uses your Mac's language")
                     }
                 }
             } footer: {
@@ -234,7 +246,7 @@ struct StorageSettingsView: View {
     var body: some View {
         Form {
             Section {
-                LabeledContent("Entries folder") {
+                LabeledContent {
                     HStack {
                         if let folderSize {
                             Text(ByteCountFormatter.string(fromByteCount: folderSize, countStyle: .file))
@@ -247,31 +259,31 @@ struct StorageSettingsView: View {
                             NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: storage.rootURL.path)
                         }
                     }
+                } label: {
+                    Text("Entries folder")
+                    Text("Markdown files, videos and voice notes")
                 }
 
-                LabeledContent("Location") {
-                    Text(storage.rootURL.path)
-                        .lineLimit(3)
+                LabeledContent {
+                    HStack {
+                        if storage.isTransferring {
+                            ProgressView().controlSize(.small)
+                        }
+                        Button("Use Default") { Task { await storage.useDefaultFolder() } }
+                            .disabled(storage.isUsingDefault)
+                        Button("Choose…") { Task { await storage.chooseFolder() } }
+                            .accessibilityIdentifier("chooseStorageFolderButton")
+                    }
+                    .disabled(storage.isTransferring)
+                } label: {
+                    Text("Location")
+                    Text(storage.isTransferring ? "Transferring entries…" : storage.rootURL.abbreviatingWithTildeInPath)
+                        .lineLimit(1)
                         .truncationMode(.middle)
                         .textSelection(.enabled)
-                        .multilineTextAlignment(.trailing)
-                        .foregroundStyle(.secondary)
+                        .help(storage.rootURL.path)
                         .accessibilityIdentifier("storageFolderPath")
                 }
-
-                HStack {
-                    if storage.isTransferring {
-                        ProgressView().controlSize(.small)
-                        Text("Transferring entries…")
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Use Default") { Task { await storage.useDefaultFolder() } }
-                        .disabled(storage.isUsingDefault)
-                    Button("Choose Folder…") { Task { await storage.chooseFolder() } }
-                        .accessibilityIdentifier("chooseStorageFolderButton")
-                }
-                .disabled(storage.isTransferring)
             } footer: {
                 SettingsFootnote(storage.isUsingDefault
                      ? "Entries are plain Markdown files, videos and voice notes. The default folder is inside Freewrite's app container; choose a folder such as Documents or iCloud Drive to keep them where you can find them."
@@ -343,14 +355,6 @@ enum AppPermission: String, CaseIterable, Identifiable {
         }
     }
 
-    var tint: Color {
-        switch self {
-        case .microphone: return .orange
-        case .camera: return .green
-        case .speechRecognition: return .purple
-        }
-    }
-
     /// Anchor of the matching Privacy & Security page in System Settings.
     private var privacyAnchor: String {
         switch self {
@@ -419,7 +423,10 @@ struct PermissionsSettingsView: View {
     private func row(_ permission: AppPermission) -> some View {
         let status = statuses[permission] ?? permission.status
         return HStack(spacing: 10) {
-            SettingsIconTile(systemImage: permission.systemImage, tint: permission.tint, size: 26)
+            Image(systemName: permission.systemImage)
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text(permission.title)
                 Text(permission.purpose)
@@ -464,13 +471,6 @@ struct AboutSettingsView: View {
     private static let repository = URL(string: "https://github.com/jeremyosih/freewrite")!
     private static let original = URL(string: "https://github.com/farzaa/freewrite")!
 
-    private var version: String {
-        let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
-        let build = info?["CFBundleVersion"] as? String ?? "?"
-        return "Version \(short) (\(build))"
-    }
-
     var body: some View {
         Form {
             Section {
@@ -482,7 +482,7 @@ struct AboutSettingsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Freewrite")
                             .font(.headline)
-                        Text(version)
+                        Text(AppVersion.display)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
@@ -498,12 +498,13 @@ struct AboutSettingsView: View {
             }
 
             Section {
-                LabeledContent("Welcome entry") {
+                LabeledContent {
                     Button("Show") { showWelcomeEntry() }
                         .accessibilityIdentifier("showWelcomeEntryButton")
+                } label: {
+                    Text("Welcome entry")
+                    Text("Opens a new entry with the welcome text Freewrite starts with")
                 }
-            } footer: {
-                SettingsFootnote("Opens a new entry with the welcome text Freewrite starts with.")
             }
         }
         .formStyle(.grouped)
@@ -533,5 +534,15 @@ struct AboutSettingsView: View {
             try? await Task.sleep(for: .milliseconds(500))
             AppCommand.showWelcomeEntry.post()
         }
+    }
+}
+
+private extension URL {
+    /// The path with the real home folder shown as ~ (in the sandbox `NSHomeDirectory()` is the
+    /// app container, so the default folder still reads as being inside Library/Containers).
+    var abbreviatingWithTildeInPath: String {
+        guard let home = getpwuid(getuid())?.pointee.pw_dir.map({ String(cString: $0) }),
+              path == home || path.hasPrefix(home + "/") else { return path }
+        return "~" + path.dropFirst(home.count)
     }
 }
