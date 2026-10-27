@@ -72,6 +72,7 @@ freewrite/
 │   ├── ContentView.swift         # Main view (1400+ lines)
 │   ├── VideoRecordingView.swift  # Video recording interface
 │   ├── VideoPlayerView.swift     # Video playback interface
+│   ├── SettingsView.swift        # Settings window (⌘,), stored settings keys, shortcuts + menu commands
 │   └── freewrite.entitlements    # App permissions
 ├── CLAUDE.md                     # This file
 └── AGENTS.md                     # Duplicate of this file
@@ -203,8 +204,8 @@ struct VideoPlayerView: View {
 │                                                         │
 ├─────────────────────────────────────────────────────────┤
 │  Bottom Nav Bar:                                        │
-│  [16px] • [Lato] • [Arial] • [System] • [Serif] • ...  │
-│  ... [15:00] • [🎥] • [Chat] • [Backspace] • [...]     │
+│                [15:00] • [🎥] • [Chat] • [Backspace] •  │
+│        [Fullscreen] • [New Entry] • [🕐] • [⚙︎]          │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -227,21 +228,24 @@ struct VideoPlayerView: View {
 
 ## Navigation Bar Items
 
-### Left Side (Font Controls)
-- **Font Size**: Cycles through [16, 18, 20, 22, 24, 26]px
-- **Font Selection**: Lato, Arial, System, Serif, Random
-- Hover changes cursor to pointing hand
-- **Video Mode Left Slot**: Replaced by `Copy Transcript` when viewing a video entry
+### Left Side
+- Empty for text entries (font controls moved to Settings)
+- **Video Mode Left Slot**: `Copy Transcript` when viewing a video entry
 
 ### Right Side (Utilities)
-- **Timer**: Shows time remaining, click to start/stop, double-click to reset
+- **Timer**: Shows time remaining, click to start/stop, double-click to reset (to the Settings session length)
 - **Video Camera (🎥)**: Opens immersive video recording overlay
 - **Chat**: Opens AI chat menu (ChatGPT/Claude integration)
 - **Backspace Toggle**: Enable/disable backspace key
 - **Fullscreen**: Toggle fullscreen mode
 - **New Entry**: Creates new text entry
-- **Theme Toggle**: 🌙/☀️ for dark/light mode
 - **History**: 🕐 Shows/hides sidebar
+- **Settings**: ⚙︎ `SettingsLink` opening the Settings window
+
+### Settings Window & Shortcuts (`SettingsView.swift`)
+- `Settings { SettingsView() }` scene in `freewriteApp.swift`; tabs: Writing (font, size, theme, timer length), Shortcuts.
+- Every app action is an `AppCommand`. `FreewriteCommands` builds the menu items with the user's shortcuts and posts `AppCommand.notification`; `ContentView.handle(_:)` performs the action.
+- Shortcuts are stored as JSON overrides in `UserDefaults["shortcuts"]` (missing key = default, `null` = unassigned). Recording requires ⌘, ⌃ or ⌥ so plain typing never triggers a command.
 
 ## Video Recording Flow
 
@@ -905,11 +909,13 @@ Generated at save time and stored in the per-entry video directory; sidebar load
 
 ## Feature Flags / Settings
 
-Stored in `UserDefaults`:
+Stored in `UserDefaults` (keys in `SettingsKey`, read via `@AppStorage`):
 - `colorScheme`: "light" or "dark"
+- `fontName`, `fontSize`: writing font family/PostScript name and size
+- `sessionMinutes`: timer length (default 15)
+- `shortcuts`: JSON map of `AppCommand` → shortcut overrides
 
-Other settings are session-only (not persisted):
-- Font size, font family, timer duration, backspace state
+Session-only (not persisted): backspace state
 
 ## Future Development Notes
 

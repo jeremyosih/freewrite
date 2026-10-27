@@ -87,17 +87,16 @@ struct ContentView: View {
     @State private var text: String = ""  // Remove initial welcome text since we'll handle it in createNewEntry
     
     @State private var isFullscreen = false
-    @State private var selectedFont: String = "Lato-Regular"
+    @AppStorage(SettingsKey.fontName) private var selectedFont: String = WritingFont.defaultName
+    @AppStorage(SettingsKey.fontSize) private var fontSizeSetting: Double = WritingFont.defaultSize
+    @AppStorage(SettingsKey.colorScheme) private var colorSchemeSetting: String = "light"
+    @AppStorage(SettingsKey.sessionMinutes) private var sessionMinutes: Int = 15
     @State private var keyDownMonitor: Any?
     @State private var scrollWheelMonitor: Any?
-    @State private var currentRandomFont: String = ""
     @State private var timeRemaining: Int = 900  // Changed to 900 seconds (15 minutes)
     @State private var timerIsRunning = false
     @State private var isHoveringTimer = false
     @State private var isHoveringFullscreen = false
-    @State private var hoveredFont: String? = nil
-    @State private var isHoveringSize = false
-    @State private var fontSize: CGFloat = 18
     @State private var blinkCount = 0
     @State private var isBlinking = false
     @State private var opacity: Double = 1.0
@@ -123,8 +122,7 @@ struct ContentView: View {
     @State private var isHoveringHistoryPath = false
     @State private var isHoveringHistoryArrow = false
     @State private var isHoveringCopyTranscript = false
-    @State private var colorScheme: ColorScheme = .light // Add state for color scheme
-    @State private var isHoveringThemeToggle = false // Add state for theme toggle hover
+    @State private var isHoveringSettings = false
     @State private var didCopyPrompt: Bool = false // Add state for copy prompt feedback
     @State private var didCopyTranscript: Bool = false
     @State private var selectedVideoHasTranscript = false
@@ -142,9 +140,8 @@ struct ContentView: View {
     let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     let entryHeight: CGFloat = 40
     
-    let availableFonts = NSFontManager.shared.availableFontFamilies
-    let standardFonts = ["Lato-Regular", "Arial", ".AppleSystemUIFont", "Times New Roman"]
-    let fontSizes: [CGFloat] = [16, 18, 20, 22, 24, 26]
+    private var fontSize: CGFloat { CGFloat(fontSizeSetting) }
+    private var colorScheme: ColorScheme { colorSchemeSetting == "dark" ? .dark : .light }
     let placeholderOptions = [
         "Begin writing",
         "Pick a thought and go",
@@ -226,13 +223,6 @@ struct ContentView: View {
 
     Here's my journal entry:
     """
-    
-    // Initialize with saved theme preference if available
-    init() {
-        // Load saved color scheme preference
-        let savedScheme = UserDefaults.standard.string(forKey: "colorScheme") ?? "light"
-        _colorScheme = State(initialValue: savedScheme == "dark" ? .dark : .light)
-    }
     
     // Modify getDocumentsDirectory to use cached value
     private func getDocumentsDirectory() -> URL {
@@ -677,8 +667,31 @@ struct ContentView: View {
         }
     }
     
-    var randomButtonTitle: String {
-        return currentRandomFont.isEmpty ? "Random" : "Random [\(currentRandomFont)]"
+    private func handle(_ command: AppCommand) {
+        switch command {
+        case .newEntry:
+            createNewEntry()
+        case .toggleHistory:
+            withAnimation(.easeInOut(duration: 0.2)) {
+                showingSidebar.toggle()
+            }
+        case .toggleTimer:
+            timerIsRunning.toggle()
+        case .recordVideo:
+            startVideoRecordingPreflight()
+        case .openChat:
+            didCopyPrompt = false
+            showingChatMenu = true
+        case .toggleBackspace:
+            backspaceDisabled.toggle()
+        case .toggleTheme:
+            colorSchemeSetting = colorScheme == .light ? "dark" : "light"
+        case .increaseFontSize, .decreaseFontSize:
+            let sizes = WritingFont.sizes
+            let index = sizes.firstIndex(of: fontSizeSetting) ?? sizes.firstIndex(of: WritingFont.defaultSize) ?? 0
+            let step = command == .increaseFontSize ? 1 : -1
+            fontSizeSetting = sizes[min(max(index + step, 0), sizes.count - 1)]
+        }
     }
 
     private func startVideoRecordingPreflight() {
@@ -850,10 +863,6 @@ struct ContentView: View {
         return (fontSize * 1.5) - defaultLineHeight
     }
     
-    var fontSizeButtonTitle: String {
-        return "\(Int(fontSize))px"
-    }
-    
     // Add a color utility computed property
     var popoverBackgroundColor: Color {
         return colorScheme == .light ? Color(NSColor.controlBackgroundColor) : Color(NSColor.darkGray)
@@ -964,129 +973,6 @@ struct ContentView: View {
                             .onHover { hovering in
                                 isHoveringBottomNav = hovering
                             }
-                        } else {
-                            // Font buttons (left)
-                            HStack(spacing: 8) {
-                                Button(fontSizeButtonTitle) {
-                                    if let currentIndex = fontSizes.firstIndex(of: fontSize) {
-                                        let nextIndex = (currentIndex + 1) % fontSizes.count
-                                        fontSize = fontSizes[nextIndex]
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundColor(isHoveringSize ? textHoverColor : textColor)
-                                .onHover { hovering in
-                                    isHoveringSize = hovering
-                                    isHoveringBottomNav = hovering
-                                    if hovering {
-                                        NSCursor.pointingHand.push()
-                                    } else {
-                                        NSCursor.pop()
-                                    }
-                                }
-                                
-                                Text("•")
-                                    .foregroundColor(.gray)
-                                
-                                Button("Lato") {
-                                    selectedFont = "Lato-Regular"
-                                    currentRandomFont = ""
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundColor(hoveredFont == "Lato" ? textHoverColor : textColor)
-                                .onHover { hovering in
-                                    hoveredFont = hovering ? "Lato" : nil
-                                    isHoveringBottomNav = hovering
-                                    if hovering {
-                                        NSCursor.pointingHand.push()
-                                    } else {
-                                        NSCursor.pop()
-                                    }
-                                }
-                                
-                                Text("•")
-                                    .foregroundColor(.gray)
-                                
-                                Button("Arial") {
-                                    selectedFont = "Arial"
-                                    currentRandomFont = ""
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundColor(hoveredFont == "Arial" ? textHoverColor : textColor)
-                                .onHover { hovering in
-                                    hoveredFont = hovering ? "Arial" : nil
-                                    isHoveringBottomNav = hovering
-                                    if hovering {
-                                        NSCursor.pointingHand.push()
-                                    } else {
-                                        NSCursor.pop()
-                                    }
-                                }
-                                
-                                Text("•")
-                                    .foregroundColor(.gray)
-                                
-                                Button("System") {
-                                    selectedFont = ".AppleSystemUIFont"
-                                    currentRandomFont = ""
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundColor(hoveredFont == "System" ? textHoverColor : textColor)
-                                .onHover { hovering in
-                                    hoveredFont = hovering ? "System" : nil
-                                    isHoveringBottomNav = hovering
-                                    if hovering {
-                                        NSCursor.pointingHand.push()
-                                    } else {
-                                        NSCursor.pop()
-                                    }
-                                }
-                                
-                                Text("•")
-                                    .foregroundColor(.gray)
-                                
-                                Button("Serif") {
-                                    selectedFont = "Times New Roman"
-                                    currentRandomFont = ""
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundColor(hoveredFont == "Serif" ? textHoverColor : textColor)
-                                .onHover { hovering in
-                                    hoveredFont = hovering ? "Serif" : nil
-                                    isHoveringBottomNav = hovering
-                                    if hovering {
-                                        NSCursor.pointingHand.push()
-                                    } else {
-                                        NSCursor.pop()
-                                    }
-                                }
-                                
-                                Text("•")
-                                    .foregroundColor(.gray)
-                                
-                                Button(randomButtonTitle) {
-                                    if let randomFont = availableFonts.randomElement() {
-                                        selectedFont = randomFont
-                                        currentRandomFont = randomFont
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundColor(hoveredFont == "Random" ? textHoverColor : textColor)
-                                .onHover { hovering in
-                                    hoveredFont = hovering ? "Random" : nil
-                                    isHoveringBottomNav = hovering
-                                    if hovering {
-                                        NSCursor.pointingHand.push()
-                                    } else {
-                                        NSCursor.pop()
-                                    }
-                                }
-                            }
-                            .padding(8)
-                            .cornerRadius(6)
-                            .onHover { hovering in
-                                isHoveringBottomNav = hovering
-                            }
                         }
                         
                         Spacer()
@@ -1097,7 +983,7 @@ struct ContentView: View {
                                 let now = Date()
                                 if let lastClick = lastClickTime,
                                    now.timeIntervalSince(lastClick) < 0.3 {
-                                    timeRemaining = 900
+                                    timeRemaining = sessionMinutes * 60
                                     timerIsRunning = false
                                     lastClickTime = nil
                                 } else {
@@ -1449,29 +1335,6 @@ struct ContentView: View {
                             Text("•")
                                 .foregroundColor(.gray)
                             
-                            // Theme toggle button
-                            Button(action: {
-                                colorScheme = colorScheme == .light ? .dark : .light
-                                // Save preference
-                                UserDefaults.standard.set(colorScheme == .light ? "light" : "dark", forKey: "colorScheme")
-                            }) {
-                                Image(systemName: colorScheme == .light ? "moon.fill" : "sun.max.fill")
-                                    .foregroundColor(isHoveringThemeToggle ? textHoverColor : textColor)
-                            }
-                            .buttonStyle(.plain)
-                            .onHover { hovering in
-                                isHoveringThemeToggle = hovering
-                                isHoveringBottomNav = hovering
-                                if hovering {
-                                    NSCursor.pointingHand.push()
-                                } else {
-                                    NSCursor.pop()
-                                }
-                            }
-
-                            Text("•")
-                                .foregroundColor(.gray)
-
                             // Version history button
                             Button(action: {
                                 withAnimation(.easeInOut(duration: 0.2)) {
@@ -1484,6 +1347,26 @@ struct ContentView: View {
                             .buttonStyle(.plain)
                             .onHover { hovering in
                                 isHoveringClock = hovering
+                                isHoveringBottomNav = hovering
+                                if hovering {
+                                    NSCursor.pointingHand.push()
+                                } else {
+                                    NSCursor.pop()
+                                }
+                            }
+
+                            Text("•")
+                                .foregroundColor(.gray)
+
+                            // Settings (font, theme, timer length, shortcuts)
+                            SettingsLink {
+                                Image(systemName: "gearshape")
+                                    .foregroundColor(isHoveringSettings ? textHoverColor : textColor)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Settings")
+                            .onHover { hovering in
+                                isHoveringSettings = hovering
                                 isHoveringBottomNav = hovering
                                 if hovering {
                                     NSCursor.pointingHand.push()
@@ -1723,8 +1606,23 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.2), value: showingSidebar)
         .preferredColorScheme(colorScheme)
         .onAppear {
+            WritingWindow.openCount += 1
             showingSidebar = false  // Hide sidebar by default
+            timeRemaining = sessionMinutes * 60
             loadExistingEntries()
+        }
+        .onDisappear {
+            WritingWindow.openCount -= 1
+        }
+        .onChange(of: sessionMinutes) { _, minutes in
+            if !timerIsRunning {
+                timeRemaining = minutes * 60
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AppCommand.notification)) { notification in
+            guard let rawValue = notification.object as? String,
+                  let command = AppCommand(rawValue: rawValue) else { return }
+            handle(command)
         }
         .onChange(of: showingVideoRecording) { _, isShowing in
             if !isShowing {
