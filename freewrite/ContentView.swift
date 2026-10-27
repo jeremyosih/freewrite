@@ -128,6 +128,13 @@ struct ContentView: View {
     @State private var selectedVideoHasTranscript = false
     /// Hex progress or failure per video entry; only the selected entry's is shown.
     @State private var transcriptionStatuses: [UUID: String] = [:]
+    @State private var showingCommandPalette = false
+    @State private var paletteDocuments: [PaletteDocument]? = nil
+    /// Identifies the palette opening a document read belongs to, so a slower read from an
+    /// earlier opening can't replace newer results.
+    @State private var paletteLoadID: UUID? = nil
+    @AppStorage(SettingsKey.shortcuts) private var shortcutsJSON = "{}"
+    @Environment(\.openSettings) private var openSettings
     @State private var backspaceDisabled = false // Add state for backspace toggle
     @State private var isHoveringBackspaceToggle = false // Add state for backspace toggle hover
     @State private var showingVideoRecording = false // Add state for video recording view
@@ -669,8 +676,75 @@ struct ContentView: View {
         }
     }
     
+    /// Saves the current text entry, then selects and loads another one.
+    private func selectEntry(id: UUID) {
+        guard selectedEntryId != id else { return }
+        if let currentId = selectedEntryId,
+           let currentEntry = entries.first(where: { $0.id == currentId }),
+           currentEntry.entryType == .text {
+            saveEntry(entry: currentEntry)
+        }
+
+        // Re-resolve from source of truth after any state mutations.
+        guard let targetEntry = entries.first(where: { $0.id == id }) else {
+            historyDebug("SELECT target missing id=\(id.uuidString)")
+            return
+        }
+        selectedEntryId = targetEntry.id
+        historyDebug("SELECT resolved target \(debugEntrySummary(targetEntry))")
+        loadEntry(entry: targetEntry)
+    }
+
+    private func openCommandPalette() {
+        let loadID = UUID()
+        paletteLoadID = loadID
+        paletteDocuments = nil
+        showingCommandPalette = true
+        // Read every entry's text (or video transcript) off the main thread.
+        let sources: [(entry: HumanEntry, url: URL?)] = entries.map { entry in
+            if entry.entryType == .video {
+                return (entry, resolvedVideoFilename(for: entry).map(getVideoTranscriptURL(for:)))
+            }
+            return (entry, getDocumentsDirectory().appendingPathComponent(entry.filename))
+        }
+        Task {
+            let documents = await Task.detached(priority: .userInitiated) {
+                sources.map { source in
+                    PaletteDocument(
+                        id: source.entry.id,
+                        date: source.entry.date,
+                        isVideo: source.entry.entryType == .video,
+                        body: source.url.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
+                    )
+                }
+            }.value
+            if showingCommandPalette && paletteLoadID == loadID {
+                paletteDocuments = documents
+            }
+        }
+    }
+
+    private func performPaletteItem(_ item: PaletteItem) {
+        showingCommandPalette = false
+        switch item {
+        case .entry(let document, _):
+            selectEntry(id: document.id)
+        case .command(let command):
+            handle(command)
+        case .settings:
+            openSettings()
+        }
+    }
+
     private func handle(_ command: AppCommand) {
         switch command {
+        case .commandPalette:
+            if showingCommandPalette {
+                showingCommandPalette = false
+            } else if !isPreparingVideoRecording && !showingVideoRecording {
+                // The video recorder owns the window while it's up.
+                openCommandPalette()
+            }
         case .newEntry:
             createNewEntry()
         case .toggleHistory:
@@ -701,6 +775,7 @@ struct ContentView: View {
             return
         }
 
+        showingCommandPalette = false
         showingVideoPermissionPopover = false
         videoPermissionPopoverItems = []
         videoPermissionPopoverFallbackMessage = nil
@@ -921,7 +996,10 @@ struct ContentView: View {
                         guard keyDownMonitor == nil else { return }
                         keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                             // Check if backspace is disabled and the key is delete/backspace
-                            if backspaceDisabled && (event.keyCode == 51 || event.keyCode == 117) {
+                            // Only the writing editor: leave the palette search and the Settings window alone.
+                            let isSettingsWindow = event.window?.identifier?.rawValue.contains("Settings") == true
+                            if backspaceDisabled && !showingCommandPalette && !isSettingsWindow
+                                && (event.keyCode == 51 || event.keyCode == 117) {
                                 // Block the backspace/delete key
                                 return nil
                             }
@@ -1465,24 +1543,8 @@ struct ContentView: View {
                         LazyVStack(spacing: 0) {
                             ForEach(entries) { entry in
                                 Button(action: {
-                                    if selectedEntryId != entry.id {
-                                        historyDebug("ROW TAP \(debugEntrySummary(entry))")
-                                        // Save current entry before switching
-                                        if let currentId = selectedEntryId,
-                                           let currentEntry = entries.first(where: { $0.id == currentId }),
-                                           currentEntry.entryType == .text {
-                                            saveEntry(entry: currentEntry)
-                                        }
-
-                                        // Re-resolve from source of truth after any state mutations.
-                                        guard let targetEntry = entries.first(where: { $0.id == entry.id }) else {
-                                            historyDebug("ROW TAP target missing id=\(entry.id.uuidString)")
-                                            return
-                                        }
-                                        selectedEntryId = targetEntry.id
-                                        historyDebug("ROW TAP resolved target \(debugEntrySummary(targetEntry))")
-                                        loadEntry(entry: targetEntry)
-                                    }
+                                    historyDebug("ROW TAP \(debugEntrySummary(entry))")
+                                    selectEntry(id: entry.id)
                                 }) {
                                     HStack(alignment: .top) {
                                         // Show video thumbnail for video entries
@@ -1614,6 +1676,18 @@ struct ContentView: View {
                 // Extend the sidebar background under the hidden title bar so the column
                 // isn't cut off ~30pt below the top of the window.
                 .background(Color(colorScheme == .light ? .white : NSColor.black).ignoresSafeArea(edges: .top))
+            }
+        }
+        .overlay {
+            if showingCommandPalette {
+                CommandPaletteView(
+                    documents: paletteDocuments,
+                    shortcutsJSON: shortcutsJSON,
+                    colorScheme: colorScheme,
+                    onSelect: performPaletteItem,
+                    onDismiss: { showingCommandPalette = false }
+                )
+                .zIndex(5)
             }
         }
         .overlay {

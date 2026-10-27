@@ -74,6 +74,7 @@ freewrite/
 │   ├── VideoPlayerView.swift     # Video playback interface
 │   ├── SettingsView.swift        # Settings window (⌘,), stored settings keys, shortcuts + menu commands
 │   ├── Transcription.swift       # Transcription engines: Apple (live, on-device) or Hex local API client
+│   ├── CommandPalette.swift      # ⌘K palette: full-text entry search + actions
 │   └── freewrite.entitlements    # App permissions
 ├── CLAUDE.md                     # This file
 └── AGENTS.md                     # Duplicate of this file
@@ -247,6 +248,16 @@ struct VideoPlayerView: View {
 - `Settings { SettingsView() }` scene in `freewriteApp.swift`; tabs: Writing (font, size, theme, timer length), Shortcuts.
 - Every app action is an `AppCommand`. `FreewriteCommands` builds the menu items with the user's shortcuts and posts `AppCommand.notification`; `ContentView.handle(_:)` performs the action.
 - Shortcuts are stored as JSON overrides in `UserDefaults["shortcuts"]` (missing key = default, `null` = unassigned). Recording requires ⌘, ⌃ or ⌥ so plain typing never triggers a command.
+
+### Command Palette (⌘K, `CommandPalette.swift`)
+- `AppCommand.commandPalette` toggles an overlay in `ContentView`. On open, every entry's text (or its video `transcript.md`) is read off the main thread into `PaletteDocument`s.
+- Empty query: 8 most recent entries, then all actions. With a query: up to 4 matching actions, then entries where every term matches (case/diacritic-insensitive), title hits first.
+- ↑/↓ to move, ↩ to open, Esc or click outside to close. Selecting an entry goes through `selectEntry(id:)` (same save-then-load path as history rows).
+- The backspace blocker ignores the palette and the Settings window.
+- Results are cached in the view and recomputed only when the query or documents change; the highlight is tracked by item id. Each opening gets a `paletteLoadID` so a slower read from an earlier opening is dropped. The palette doesn't open while the video recorder is up.
+
+### Accessibility
+Bottom-bar controls, the editor and history rows carry `accessibilityLabel`s (where the visible text isn't enough) and stable `accessibilityIdentifier`s (`timerButton`, `recordVideoButton`, `historyButton`, `settingsButton`, `newEntryButton`, `editor`, `historyRow-<uuid>`, `commandPaletteSearch`, …) for VoiceOver and UI automation.
 
 ## Video Recording Flow
 

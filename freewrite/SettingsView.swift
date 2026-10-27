@@ -37,6 +37,7 @@ enum WritingFont {
 // MARK: - Shortcuts
 
 enum AppCommand: String, CaseIterable, Identifiable {
+    case commandPalette
     case newEntry
     case toggleHistory
     case toggleTimer
@@ -51,6 +52,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
+        case .commandPalette: return "Search Entries & Actions"
         case .newEntry: return "New Entry"
         case .toggleHistory: return "Show/Hide History"
         case .toggleTimer: return "Start/Pause Timer"
@@ -65,6 +67,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
 
     var defaultShortcut: KeyShortcut? {
         switch self {
+        case .commandPalette: return KeyShortcut(key: "k", modifiers: [.command])
         case .newEntry: return KeyShortcut(key: "n", modifiers: [.command])
         case .toggleHistory: return KeyShortcut(key: "h", modifiers: [.command, .shift])
         case .toggleTimer: return KeyShortcut(key: "t", modifiers: [.command])
@@ -220,6 +223,7 @@ struct FreewriteCommands: Commands {
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             button(for: .newEntry)
+            button(for: .commandPalette)
         }
         CommandMenu("Write") {
             button(for: .toggleTimer)
