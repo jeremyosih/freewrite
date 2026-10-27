@@ -467,23 +467,28 @@ private struct GeneralSettingsView: View {
     @AppStorage(SettingsKey.fontSize) private var fontSize = WritingFont.defaultSize
     @AppStorage(SettingsKey.colorScheme) private var colorScheme = "light"
     @AppStorage(SettingsKey.sessionMinutes) private var sessionMinutes = 15
+    @AppStorage(FavoriteFonts.key) private var favoriteFontsJSON = ""
+    @State private var showingAddFavorite = false
 
     private let allFamilies = NSFontManager.shared.availableFontFamilies.sorted()
 
+    private var favorites: [String] { FavoriteFonts.decode(favoriteFontsJSON) }
+
     var body: some View {
+        let favorites = self.favorites
         Form {
             Section("Text of New Pages") {
                 Picker(selection: $fontName) {
-                    ForEach(WritingFont.presets, id: \.name) { preset in
-                        Text(preset.label).tag(preset.name)
+                    ForEach(favorites, id: \.self) { name in
+                        Text(FavoriteFonts.label(for: name)).tag(name)
                     }
-                    Divider()
-                    ForEach(allFamilies, id: \.self) { family in
+                    if !favorites.isEmpty { Divider() }
+                    ForEach(allFamilies.filter { !favorites.contains($0) }, id: \.self) { family in
                         Text(family).tag(family)
                     }
-                    // Keep a previously chosen font selectable even if it's no longer installed.
-                    if !allFamilies.contains(fontName) && !WritingFont.presets.contains(where: { $0.name == fontName }) {
-                        Text(fontName).tag(fontName)
+                    // Keep the chosen font selectable when it is neither installed as a family nor a favorite.
+                    if !allFamilies.contains(fontName) && !favorites.contains(fontName) {
+                        Text(FavoriteFonts.label(for: fontName)).tag(fontName)
                     }
                 } label: {
                     Text("Font")
@@ -520,6 +525,50 @@ private struct GeneralSettingsView: View {
                 }
             }
 
+            Section {
+                ForEach(Array(favorites.enumerated()), id: \.element) { index, name in
+                    FavoriteFontRow(
+                        name: name,
+                        canMoveUp: index > 0,
+                        canMoveDown: index < favorites.count - 1,
+                        move: { step in moveFavorite(name, by: step) },
+                        remove: { setFavorites(favorites.filter { $0 != name }) }
+                    )
+                }
+                .onMove { source, destination in
+                    var list = favorites
+                    list.move(fromOffsets: source, toOffset: destination)
+                    setFavorites(list)
+                }
+                if favorites.isEmpty {
+                    Text("No favorites. The Font menu still has Random and Use Default.")
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Button {
+                        showingAddFavorite = true
+                    } label: {
+                        Label("Add Font…", systemImage: "plus")
+                    }
+                    .popover(isPresented: $showingAddFavorite, arrowEdge: .bottom) {
+                        AddFavoriteFontView(families: allFamilies.filter { !favorites.contains($0) }) { family in
+                            setFavorites(FavoriteFonts.adding(family, to: favorites))
+                            showingAddFavorite = false
+                        }
+                    }
+                    .accessibilityIdentifier("addFavoriteFont")
+                    Spacer()
+                    Button("Restore Defaults") {
+                        favoriteFontsJSON = ""
+                    }
+                    .disabled(favoriteFontsJSON.isEmpty || favorites == FavoriteFonts.defaults)
+                }
+            } header: {
+                Text("Favorite Fonts")
+            } footer: {
+                SettingsFootnote("First in the bottom bar's Font menu and the font pickers. Drag to reorder. Random Font picks from the other installed fonts.")
+            }
+
             Section("Appearance") {
                 Picker(selection: $colorScheme) {
                     Text("Light").tag("light")
@@ -546,6 +595,109 @@ private struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private func setFavorites(_ names: [String]) {
+        favoriteFontsJSON = FavoriteFonts.encode(names)
+    }
+
+    private func moveFavorite(_ name: String, by step: Int) {
+        var list = favorites
+        guard let index = list.firstIndex(of: name), list.indices.contains(index + step) else { return }
+        list.swapAt(index, index + step)
+        setFavorites(list)
+    }
+}
+
+/// A favorite font: its name drawn in the font (+ the family when the label hides it), and −.
+private struct FavoriteFontRow: View {
+    let name: String
+    let canMoveUp: Bool
+    let canMoveDown: Bool
+    let move: (Int) -> Void
+    let remove: () -> Void
+
+    var body: some View {
+        let label = FavoriteFonts.label(for: name)
+        HStack(spacing: 8) {
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+            Text(label)
+                .font(Font(WritingEditor.font(named: name, size: 15)))
+                .lineLimit(1)
+            // "Serif" says which font it is; PostScript names like "Lato-Regular" add nothing.
+            if label != name, !name.hasPrefix("."), name != label + "-Regular" {
+                Text(name)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button(action: remove) {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.borderless)
+            .help("Remove from favorites")
+            .accessibilityLabel("Remove \(label)")
+        }
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button("Move Up") { move(-1) }.disabled(!canMoveUp)
+            Button("Move Down") { move(1) }.disabled(!canMoveDown)
+            Divider()
+            Button("Remove", action: remove)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("favoriteFontRow-\(name)")
+    }
+}
+
+/// The + popover: installed font families, each drawn in its font, with a search field.
+private struct AddFavoriteFontView: View {
+    let families: [String]
+    let add: (String) -> Void
+    @State private var query = ""
+
+    private var matches: [String] {
+        let query = query.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return families }
+        return families.filter { $0.localizedStandardContains(query) }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TextField("Search fonts", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .padding(10)
+                .accessibilityIdentifier("favoriteFontSearch")
+            Divider()
+            if matches.isEmpty {
+                Text("No fonts match.")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(matches, id: \.self) { family in
+                    Button {
+                        add(family)
+                    } label: {
+                        Text(family)
+                            .font(Font(WritingEditor.font(named: family, size: 14)))
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(family)
+                }
+                .listStyle(.plain)
+            }
+        }
+        .frame(width: 280, height: 340)
+        .onSubmit {
+            if let first = matches.first { add(first) }
+        }
     }
 }
 
