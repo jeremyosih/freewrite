@@ -83,6 +83,8 @@ freewrite/
 │   ├── Reviewers.swift           # ReviewerProfile (+ 3 defaults), stored in UserDefaults["reviewers"]
 │   ├── Reviews.swift             # ReviewService: PiDurableKit harness, reviewer tools, Keychain credentials
 │   ├── AgentsSettingsView.swift  # Settings › Agents: providers (Claude key, ChatGPT sign-in/OpenAI key) + reviewer profiles
+│   ├── NoteLock.swift            # Locked notes: .fwlock format, recovery key, Secure Enclave vault, NoteLockSession
+│   ├── PrivacySettingsView.swift # Settings › Privacy + recovery key sheets
 │   └── freewrite.entitlements    # App permissions
 ├── Vendor/PiDurableKit/          # Vendored finnvoor/PiDurableKit (CC0), local Swift package; see VENDORED.md
 ├── CLAUDE.md                     # This file
@@ -267,6 +269,8 @@ struct VideoPlayerView: View {
 ### Bottom Bar (customizable, `BottomBar.swift`)
 - Items: Review (✦: Review with… menu, spinner while a review runs; writing-only, default right), Versions (`vN ⌃` menu: list/switch versions, New Version; default left), Timer, Record Video, Record Voice Note (🎙; while recording the bar becomes `● 3:42 ▁▃▅ Stop • Discard`), Backspace Toggle, Fullscreen, New Entry, History, Settings. Each is Left, Right or Hidden, in a user-defined order (Settings › Bottom Bar, drag to reorder, live preview). Stored as JSON in `UserDefaults["bottomBarLayout"]`; unknown items are dropped and new ones are added at their default side.
 - `ContentView.bottomBarItemView(_:)` renders each item; `bottomBarGroup` adds the `•` separators. Versions, Voice Note and Backspace are writing-only (hidden on video entries).
+- Items: Versions (`vN ⌃` menu: list/switch versions, New Version; default left), Timer, Record Video, Record Voice Note (🎙; while recording the bar becomes `● 3:42 ▁▃▅ Stop • Discard`), Backspace Toggle, Fullscreen, New Entry, History, Lock (`lock.open`/`lock.fill`, toggles the selected note's lock), Settings. New items are inserted before the item that follows them by default (Lock lands before Settings in stored layouts). Each is Left, Right or Hidden, in a user-defined order (Settings › Bottom Bar, drag to reorder, live preview). Stored as JSON in `UserDefaults["bottomBarLayout"]`; unknown items are dropped and new ones are added at their default side.
+- `ContentView.bottomBarItemView(_:)` renders each item; `bottomBarGroup` adds the `•` separators. Versions, Voice Note, Backspace and Lock are writing-only (hidden on video entries); Versions and Voice Note are also hidden while a locked note is closed.
 - Fixed status slots at the start of the left side: text entries show `Play voice note` for the current version's audio and transient status (`Transcribing…`, errors); video entries show `Copy Transcript` / transcription status.
 - Hidden items stay reachable from the menu bar, ⌘K and shortcuts. The gear and ⌘, toggle the Settings window (`SettingsWindow.toggle`).
 - The Chat (ChatGPT/Claude) feature was removed.
@@ -280,6 +284,7 @@ struct VideoPlayerView: View {
 - Permissions: Microphone, Camera, Speech Recognition (`AppPermission`) with live status (Allowed / Not allowed + Open System Settings / Not asked + Allow…), re-checked when a window becomes key or the app becomes active.
 - About: icon, version (`CFBundleShortVersionString` + build), links, **Show welcome entry** (`AppCommand.showWelcomeEntry` → new entry with `default.md`).
 - `Settings { SettingsView() }` scene in `freewriteApp.swift`; panes: Writing (font, size, theme, timer length), Transcription, Storage (entries folder), Bottom Bar, Agents (`AgentsSettingsView.swift`), Shortcuts. The selected pane is `UserDefaults["settingsPane"]`.
+- `Settings { SettingsView() }` scene in `freewriteApp.swift`; tabs: Writing (font, size, theme, timer length), Transcription, Storage (entries folder), Bottom Bar, Privacy (locked notes, `PrivacySettingsView.swift`), Shortcuts.
 - Every app action is an `AppCommand`. `FreewriteCommands` builds the menu items with the user's shortcuts and posts `AppCommand.notification`; `ContentView.handle(_:)` performs the action.
 - Shortcuts are stored as JSON overrides in `UserDefaults["shortcuts"]` (missing key = default, `null` = unassigned). Recording requires ⌘, ⌃ or ⌥ so plain typing never triggers a command.
 
@@ -323,6 +328,28 @@ Reviewers read an entry and leave margin notes (highlights with a hover comment)
 - **Profiles** (`ReviewerProfile`, JSON in `UserDefaults["reviewers"]`, missing = defaults Mirror / Editor / Coach): name, instructions, model (`provider/modelId`, empty = Automatic: Anthropic `claude-sonnet-5-5`, else OpenAI `gpt-5.5`, whichever is configured first), thinking level, colour, scope (one version / all versions), auto-run.
 - **Credentials**: `FreewriteCredentialStore` (`CredentialStore`, service `<bundle id>.models`): generic passwords in the data-protection keychain; on errSecMissingEntitlement (-34018, builds without a team) it falls back to the login keychain. Keys never touch UserDefaults, disk or the DB. Anthropic: API key. OpenAI: "Sign in with ChatGPT" (`Models.login(to: .openAI, interaction: .webAuthenticationSession())`, loopback redirect → needs `network.server`) or an API key (same provider, one credential at a time). Apple on-device models aren't offered (PiDurableKit's provider needs macOS 27 and an 8K context).
 - **Tests**: `freewriteTests/AnnotationTests.swift` (anchoring, JSON shape, toolbox) and `ReviewServiceTests.swift` (end-to-end with PiDurableKit's `FauxProvider`, in-memory credentials). Don't run `xcodebuild test` (it launches the unsandboxed app); run them headless in a scratch SwiftPM package that symlinks the app sources (`Versions`, `Annotations`, `Reviewers`, `Reviews`, `MarkdownStyling`, `Storage` + a `SettingsKey` shim) into a target named `freewrite` and depends on `Vendor/PiDurableKit`.
+## Locked Notes (`NoteLock.swift`)
+
+A text entry can be locked: encrypted at rest, opened with Touch ID, an Apple Watch or the Mac password (`.deviceOwnerAuthentication`). There is no whole-app lock. Video entries can't be locked yet (menu item disabled, status message).
+
+**Files.** `[UUID]-[date].md` → `[UUID]-[date].fwlock` (same base, so dates/sorting/`Entries/<base>/` still work). Every file in `Entries/<base>/` except `entry.json` becomes `<name>.fwlock` (`versions/v1.md.fwlock`, `audio/v1.m4a.fwlock`, `audio/v1.transcript.md.fwlock`, `annotations.json.fwlock`). `entry.json` stays plain: only version ids, dates, source and audio paths, no text (needed for the version menu/badge before opening). `HumanEntry.filename` stays the logical `.md` name; `HumanEntry.isLocked` marks it.
+Format: `"FWLK" | version 1 | algorithm 1 (AES-GCM-256) | key id (16) | recovery wrap (76) | salt (32) | nonce (12) | ciphertext | tag (16)`. File key = HKDF-SHA256(content key, salt); the whole header is the AAD. Single-shot (notes and voice notes fit in memory; a chunked v2 would be needed for videos).
+
+**Keys.** A random 256-bit content key per keyring entry. The keyring (content keys + their recovery secrets) is sealed to a Secure Enclave P-256 key (`[.privateKeyUsage, .userPresence]`, `WhenUnlockedThisDeviceOnly`; never `.biometryCurrentSet`, which destroys the key when a fingerprint is added) via ephemeral ECDH → HKDF → AES-GCM, stored with the SE key's opaque blob in `Application Support/Freewrite/vault.json` in the container (device-bound; sealing needs no prompt, opening needs the user). Each content key is also wrapped with a **recovery key** (160 random bits, shown as 8 groups of Crockford base32; HKDF, no password KDF needed) and that wrap is copied into every `.fwlock` header, so a locked file + the recovery key is all another Mac needs (no vault file has to travel with the entries folder). Keychain items with access control don't work in this ad-hoc/no-profile setup (-34018) and `keychain-access-groups` gets the app killed at launch: don't add it.
+
+**Session (`NoteLockSession.shared`, `@MainActor @Observable`).** `unlock()` evaluates `LAContext` (reuse 10 s), opens the keyring with the SE key and keeps `cipher` in memory; all locked notes are then open. `lock()` drops the keys. Closes after `noteLockTimeoutMinutes` without key/mouse/scroll events in Freewrite (15 s timer; a recording voice note counts as activity), and on sleep / screens sleep / session resign / `com.apple.screenIsLocked`. `EntryStorage.versionStore` carries `cipher`; `EntryVersionStore` routes reads/writes of a locked entry through it (`readData`/`writeData`/`currentText`/`saveCurrentText`/`data(atRelativePath:)`, and `sealCurrent`, `attachVoiceNote`, `saveTranscript`), throwing `NoteLockError.locked` without keys. Injectable `NoteDeviceKeyProvider` (`SecureEnclaveKeyProvider` in the app, `SoftwareKeyProvider` in tests).
+
+**Flows (ContentView).**
+- Lock (`AppCommand.toggleNoteLock` ⌃⌘L, history row context menu, bottom-bar Lock): first time on this Mac → `RecoveryKeySheet(.setUp)` (Copy / Save to File… / "I saved it" before Lock Note) → `createVault` (no prompt). Later locks prompt once if closed. `EntryVersionStore.lock` encrypts each file, re-reads and verifies it, top-level file last, then deletes the plain files; any failure removes the encrypted copies. Blocked while transferring, recording, or a transcript is pending.
+- Unlock Note… (same command on a locked note): confirm alert, prompt, decrypt + verify everything, then delete `.fwlock` files (top-level first). The note becomes plain files again.
+- Selecting a locked note while closed shows "This note is locked" + Unlock (prompt) in place of the editor; nothing is read. Open: decrypted to memory only (`openLockedNoteId`); autosave (`saveEntry`) writes only that note, encrypted, skipping unchanged text. On close, `text` is cleared after `openLockedNoteId` so nothing saves. A note locked on another Mac shows a hint to use the recovery key.
+- History: lock icon + "Locked note" + date, no preview/badges. ⌘K: listed as "Locked note" (searchable by that and the date), never indexed; picking one prompts. Launch never selects a locked note (like videos). Sealed versions are viewed decrypted; voice notes play from memory (`AVAudioPlayer(data:)`). A voice note recorded into an open locked note is stored encrypted; its temp `.m4a` is kept only until transcription ends. PDF export only while open. `deleteEntry` removes the `.fwlock` (+ any leftover `.md`).
+- Crash safety: if both `.md` and `.fwlock` exist, the loader lists the locked one; `removeLeftoverPlainFiles` deletes plain copies only when they match the decrypted content (when the note is opened).
+- `StorageTransfer.isEntryFilename` accepts `.fwlock`; `Entries/` already moves nested `.fwlock` files.
+
+**Settings › Privacy.** Locked-note count, open/locked + Lock Now, timeout picker, Show Recovery Key… (always prompts), Create New Recovery Key… (re-wraps and rewrites every locked file in the current folder; older copies still open with the old key), Unlock with Recovery Key… (reads recovery wraps from the folder's `.fwlock` headers, adds the keys to this Mac's keyring, creating the vault if needed), and the honest footnote.
+
+**Caveats (also in the UI).** Plaintext from before locking can survive in Time Machine, iCloud Drive versions, other folders and free disk blocks (recommend FileVault); decrypted text is in memory while open; dates and version counts stay visible. Touch ID/Watch/password prompts can only be verified by hand.
 
 ## Video Recording Flow
 
@@ -979,6 +1006,7 @@ Stored in `UserDefaults` (keys in `SettingsKey`, read via `@AppStorage`):
 - `microphoneID`: `AVCaptureDevice.uniqueID` / Core Audio UID of the recording input (empty = system default)
 - `reviewers`: JSON array of `ReviewerProfile` (missing = Mirror/Editor/Coach defaults)
 - `settingsPane`: last Settings pane
+- `noteLockTimeoutMinutes`: locked notes close after this many minutes without using Freewrite (1/5/15, default 5; 0 = only when the Mac sleeps)
 - `storageFolderBookmark`: security-scoped bookmark of the custom entries folder (missing = default container folder); edited in Settings › Storage (path, Choose Folder…, Show in Finder, Use Default)
 
 Session-only (not persisted): backspace state

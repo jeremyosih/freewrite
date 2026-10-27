@@ -17,6 +17,7 @@ enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
     case fullscreen
     case newEntry
     case history
+    case lock
     case settings
 
     var id: String { rawValue }
@@ -32,6 +33,7 @@ enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
         case .fullscreen: return "Fullscreen"
         case .newEntry: return "New Entry"
         case .history: return "History"
+        case .lock: return "Lock Note"
         case .settings: return "Settings"
         }
     }
@@ -47,6 +49,7 @@ enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
         case .fullscreen: return "arrow.up.left.and.arrow.down.right"
         case .newEntry: return "square.and.pencil"
         case .history: return "clock.arrow.circlepath"
+        case .lock: return "lock.open"
         case .settings: return "gearshape"
         }
     }
@@ -59,7 +62,7 @@ enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
         case .backspace: return "Backspace is On"
         case .fullscreen: return "Fullscreen"
         case .newEntry: return "New Entry"
-        case .recordVideo, .recordVoiceNote, .review, .history, .settings: return nil
+        case .recordVideo, .recordVoiceNote, .review, .history, .lock, .settings: return nil
         }
     }
 }
@@ -112,7 +115,10 @@ struct BottomBarLayout: Codable, Equatable {
         }
         for item in BottomBarItem.allCases where !seen.contains(item) {
             let placement = BottomBarLayout.default.slots.first { $0.item == item }?.placement ?? .right
-            slots.append(Slot(item: item, placement: placement))
+            // Before the item that follows it by default (e.g. Lock goes before Settings).
+            let later = BottomBarItem.allCases.drop(while: { $0 != item }).dropFirst()
+            let index = later.lazy.compactMap { next in slots.firstIndex { $0.item == next } }.first ?? slots.endIndex
+            slots.insert(Slot(item: item, placement: placement), at: index)
         }
         return BottomBarLayout(slots: slots)
     }

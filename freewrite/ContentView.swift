@@ -26,6 +26,8 @@ struct HumanEntry: Identifiable {
     /// Number of versions (1 unless the entry has an `Entries/` manifest).
     var versionCount = 1
     var hasVoiceNote = false
+    /// Encrypted on disk (`[UUID]-[date].fwlock`); `filename` stays the logical `.md` name.
+    var isLocked = false
 
     static func createNew() -> HumanEntry {
         let id = UUID()
@@ -70,6 +72,13 @@ struct HumanEntry: Identifiable {
             videoFilename: videoFilename
         )
     }
+}
+
+/// First lock on this Mac: the note to lock once the recovery key is saved.
+struct RecoverySetupRequest: Identifiable {
+    let id = UUID()
+    let entryId: UUID
+    let recoveryKey: RecoveryKey
 }
 
 struct HeartEmoji: Identifiable {
@@ -174,6 +183,17 @@ struct ContentView: View {
     @State private var pendingAnchors: PendingAnchors? = nil
     @State private var showingReviewMenu = false
     @State private var isHoveringReview = false
+    /// Keys of locked notes while they are open (Touch ID / Apple Watch / password).
+    private let noteLock = NoteLockSession.shared
+    /// The locked note whose decrypted text is in `text`; nil while the selected locked note
+    /// shows the "This note is locked" placeholder. Never save a locked note unless it's this.
+    @State private var openLockedNoteId: UUID? = nil
+    /// Last text written for the open locked note, so loading it doesn't rewrite the file.
+    @State private var lockedNoteSavedText: String? = nil
+    @State private var isUnlockingNotes = false
+    @State private var isHoveringLock = false
+    /// First lock on this Mac: the recovery key to save before the note is locked.
+    @State private var recoverySetup: RecoverySetupRequest? = nil
     let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     let entryHeight: CGFloat = 40
     
@@ -506,7 +526,12 @@ struct ContentView: View {
         
         do {
             let fileURLs = try fileManager.contentsOfDirectory(at: documentsDirectory, includingPropertiesForKeys: nil)
-            let mdFiles = fileURLs.filter { $0.pathExtension == "md" }
+            // A locked note is `[UUID]-[date].fwlock`; if an interrupted lock left the `.md` too,
+            // the locked copy wins and the plain one is cleaned up when the note is next opened.
+            let lockedFiles = fileURLs.filter { $0.pathExtension == LockedFileFormat.fileExtension }
+            let lockedBases = Set(lockedFiles.map { $0.deletingPathExtension().lastPathComponent })
+            let mdFiles = fileURLs.filter { $0.pathExtension == "md" && !lockedBases.contains($0.deletingPathExtension().lastPathComponent) }
+                + lockedFiles
 
             print("Found \(mdFiles.count) .md files")
             let manifests = versionStore.savedManifests()
@@ -516,13 +541,36 @@ struct ContentView: View {
                 let filename = fileURL.lastPathComponent
                 print("Processing: \(filename)")
 
-                // Only accept canonical entry filenames: [UUID]-[yyyy-MM-dd-HH-mm-ss].md
-                guard let parsed = parseCanonicalEntryFilename(filename) else {
+                // Only accept canonical entry filenames: [UUID]-[yyyy-MM-dd-HH-mm-ss].md (or .fwlock)
+                let isLocked = fileURL.pathExtension == LockedFileFormat.fileExtension
+                guard let parsed = StorageTransfer.parseEntryFilename(filename, extension: fileURL.pathExtension) else {
                     print("Skipping non-canonical entry filename: \(filename)")
                     return nil
                 }
                 let uuid = parsed.uuid
                 let fileDate = parsed.timestamp
+                if isLocked {
+                    // No preview or video: nothing of a locked note is read until it's opened.
+                    // (entry.json stays plain, so the version count is known.)
+                    let dateFormatter = DateFormatter()
+                    dateFormatter.dateFormat = "MMM d"
+                    let logicalFilename = fileURL.deletingPathExtension().lastPathComponent + ".md"
+                    return (
+                        entry: HumanEntry(
+                            id: uuid,
+                            date: dateFormatter.string(from: fileDate),
+                            filename: logicalFilename,
+                            previewText: "",
+                            entryType: .text,
+                            videoFilename: nil,
+                            versionCount: manifests[logicalFilename]?.versions.count ?? 1,
+                            hasVoiceNote: manifests[logicalFilename]?.hasVoiceNote ?? false,
+                            isLocked: true
+                        ),
+                        date: fileDate,
+                        content: ""
+                    )
+                }
 
                 // Check if there's a corresponding video file
                 let videoFilename = filename.replacingOccurrences(of: ".md", with: ".mov")
@@ -581,6 +629,7 @@ struct ContentView: View {
             let hasEmptyTextEntryToday = loadedEntries.contains {
                 isEntryFromToday($0, calendar: calendar, today: today) &&
                 $0.entryType == .text &&
+                !$0.isLocked &&
                 $0.previewText.isEmpty
             }
 
@@ -591,9 +640,9 @@ struct ContentView: View {
             entries = loadedEntries
             logEntriesOrder("loadExistingEntries")
 
-            // Never open directly into video on startup; create a fresh text entry instead.
-            if let latestEntry = entries.first, latestEntry.entryType == .video {
-                print("Latest entry is video, creating new text entry for startup")
+            // Never open directly into a video or a locked note on startup; create a fresh text entry instead.
+            if let latestEntry = entries.first, latestEntry.entryType == .video || latestEntry.isLocked {
+                print("Latest entry is a video or locked, creating new text entry for startup")
                 createNewEntry()
                 return
             }
@@ -612,6 +661,7 @@ struct ContentView: View {
                    let todayEntry = entries.first(where: {
                        isEntryFromToday($0, calendar: calendar, today: today) &&
                        $0.entryType == .text &&
+                       !$0.isLocked &&
                        $0.previewText.isEmpty
                    }) {
                     selectedEntryId = todayEntry.id
@@ -648,7 +698,11 @@ struct ContentView: View {
     private func isBottomBarItemAvailable(_ item: BottomBarItem) -> Bool {
         switch item {
         // Writing-only controls.
-        case .backspace, .versions, .recordVoiceNote, .review: return currentVideoURL == nil
+        case .backspace, .lock: return currentVideoURL == nil
+        // Nothing of a locked note is shown (or sent to a reviewer) until it's opened.
+        case .versions, .recordVoiceNote: return currentVideoURL == nil && !isSelectedNoteClosed
+        // Locked notes are never sent to a reviewer, open or not.
+        case .review: return currentVideoURL == nil && selectedTextEntry?.isLocked != true
         default: return true
         }
     }
@@ -886,6 +940,8 @@ struct ContentView: View {
                         NSCursor.pop()
                     }
                 }
+        case .lock:
+                lockButton(textColor: textColor, textHoverColor: textHoverColor)
         case .settings:
                 Button(action: { SettingsWindow.toggle(openSettings) }) {
                     Image(systemName: "gearshape")
@@ -944,6 +1000,8 @@ struct ContentView: View {
         showingCommandPalette = true
         // Read and fold every entry's text (or video transcript) off the main thread.
         let sources: [(entry: HumanEntry, url: URL?)] = entries.map { entry in
+            // Locked notes are listed by date only; their files are never read for search.
+            if entry.isLocked { return (entry, nil) }
             if entry.entryType == .video {
                 return (entry, resolvedVideoFilename(for: entry).map(getVideoTranscriptURL(for:)))
             }
@@ -957,9 +1015,10 @@ struct ContentView: View {
                         id: source.entry.id,
                         date: source.entry.date,
                         isVideo: source.entry.entryType == .video,
-                        body: source.url.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
+                        body: source.url.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? "",
+                        isLocked: source.entry.isLocked
                     )
-                    guard source.entry.entryType == .text, source.entry.versionCount > 1 else { return [current] }
+                    guard source.entry.entryType == .text, !source.entry.isLocked, source.entry.versionCount > 1 else { return [current] }
                     let filename = source.entry.filename
                     let sealed = store.manifest(for: filename).sealedVersions.reversed().map { version in
                         PaletteDocument(
@@ -984,6 +1043,9 @@ struct ContentView: View {
         switch item {
         case .entry(let document, _):
             selectEntry(id: document.id, version: document.version)
+            if document.isLocked && !noteLock.isUnlocked {
+                openLockedNotes()
+            }
         case .command(let command):
             handle(command)
         case .settings:
@@ -1008,6 +1070,10 @@ struct ContentView: View {
             toggleVoiceNoteRecording()
         case .reviewEntry:
             openReviewMenu()
+        case .toggleNoteLock:
+            if let selectedEntryId, let entry = entries.first(where: { $0.id == selectedEntryId }) {
+                toggleNoteLock(entry)
+            }
         case .toggleHistory:
             withAnimation(.easeInOut(duration: 0.2)) {
                 showingSidebar.toggle()
@@ -1179,6 +1245,221 @@ struct ContentView: View {
     }
 
 
+    // MARK: Locked notes
+
+    /// The selected text entry is locked and not open: the placeholder replaces the editor and
+    /// nothing of the note (text, versions, voice notes) is shown or written.
+    private var isSelectedNoteClosed: Bool {
+        guard let entry = selectedTextEntry else { return false }
+        return entry.isLocked && openLockedNoteId != entry.id
+    }
+
+    /// Forgets which locked note is in `text`, so nothing saves into it any more.
+    private func closeLockedNote() {
+        openLockedNoteId = nil
+        lockedNoteSavedText = nil
+    }
+
+    /// Asks for Touch ID / Apple Watch / the Mac password. The selected note then loads via
+    /// `.onChange(of: noteLock.isUnlocked)`.
+    private func openLockedNotes() {
+        guard !isUnlockingNotes else { return }
+        isUnlockingNotes = true
+        Task {
+            defer { isUnlockingNotes = false }
+            do {
+                try await noteLock.unlock()
+            } catch NoteLockError.cancelled {
+                // Stay closed, no alert.
+            } catch {
+                showStatus(error.localizedDescription)
+            }
+        }
+    }
+
+    /// Opens locked notes if needed (one prompt). False if the user cancelled or it failed.
+    private func ensureNotesOpen(reason: String) async -> Bool {
+        do {
+            try await noteLock.unlock(reason: reason)
+            return true
+        } catch NoteLockError.cancelled {
+            return false
+        } catch {
+            showStatus(error.localizedDescription)
+            return false
+        }
+    }
+
+    private func toggleNoteLock(_ entry: HumanEntry) {
+        if entry.isLocked {
+            confirmUnlockNote(entry)
+        } else {
+            lockNote(entry)
+        }
+    }
+
+    /// Locks a text entry. The first time, the recovery key sheet comes first.
+    private func lockNote(_ entry: HumanEntry) {
+        guard entry.entryType == .text else {
+            NSSound.beep()
+            showStatus("Video entries can't be locked yet.")
+            return
+        }
+        guard !storage.isTransferring, !voiceRecorder.isRecording else {
+            NSSound.beep()
+            return
+        }
+        guard transcriptionStatuses[entry.id]?.hasPrefix("Transcribing") != true else {
+            showStatus("Wait for the voice note's transcript before locking this note.", for: entry.id)
+            return
+        }
+        guard noteLock.isAvailable else {
+            showStatus(NoteLockError.unavailable.localizedDescription, for: entry.id)
+            return
+        }
+        if let vaultError = noteLock.vaultError {
+            showStatus(vaultError, for: entry.id)
+            return
+        }
+        guard noteLock.hasVault else {
+            recoverySetup = RecoverySetupRequest(entryId: entry.id, recoveryKey: .generate())
+            return
+        }
+        Task {
+            guard await ensureNotesOpen(reason: "lock this note") else { return }
+            // Re-resolve: things may have changed while the prompt was up.
+            guard let entry = entries.first(where: { $0.id == entry.id }), !entry.isLocked else { return }
+            performLock(entry)
+        }
+    }
+
+    private func performLock(_ entry: HumanEntry) {
+        let isSelected = selectedEntryId == entry.id
+        if isSelected {
+            showCurrentVersion()
+            guard saveEntry(entry: entry) else {
+                showStatus("Couldn't save this note, so it wasn't locked.", for: entry.id)
+                return
+            }
+        }
+        do {
+            let notRemoved = try versionStore.lock(entryFilename: entry.filename)
+            if let index = entries.firstIndex(where: { $0.id == entry.id }) {
+                entries[index].isLocked = true
+                entries[index].previewText = ""
+            }
+            if isSelected {
+                // It stays open until locked notes close (idle, sleep).
+                openLockedNoteId = entry.id
+                lockedNoteSavedText = text
+            }
+            showStatus(notRemoved.isEmpty
+                       ? "Note locked."
+                       : "Note locked, but \(notRemoved.count) plain file(s) couldn't be deleted.", for: entry.id)
+        } catch {
+            showStatus("Couldn't lock this note: \(error.localizedDescription)", for: entry.id)
+        }
+    }
+
+    /// Turns a locked note back into plain files, after confirming.
+    private func confirmUnlockNote(_ entry: HumanEntry) {
+        guard !storage.isTransferring, !voiceRecorder.isRecording else {
+            NSSound.beep()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Unlock this note?"
+        alert.informativeText = "It will be saved as plain files again, readable by anything that can open your entries folder. To just read it, use Unlock on the note instead: it stays encrypted on disk."
+        alert.addButton(withTitle: "Unlock Note")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        Task {
+            guard await ensureNotesOpen(reason: "unlock this note") else { return }
+            guard let entry = entries.first(where: { $0.id == entry.id }), entry.isLocked else { return }
+            if openLockedNoteId == entry.id {
+                saveEntry(entry: entry)
+            }
+            do {
+                try versionStore.unlock(entryFilename: entry.filename)
+            } catch {
+                showStatus("Couldn't unlock this note: \(error.localizedDescription)", for: entry.id)
+                return
+            }
+            guard let index = entries.firstIndex(where: { $0.id == entry.id }) else { return }
+            entries[index].isLocked = false
+            updatePreviewText(for: entries[index])
+            if selectedEntryId == entry.id {
+                loadEntry(entry: entries[index])
+            }
+            showStatus("Note unlocked.", for: entry.id)
+        }
+    }
+
+    /// Bottom-bar item: the selected note's lock state; click to lock or unlock it.
+    private func lockButton(textColor: Color, textHoverColor: Color) -> some View {
+        let isLocked = selectedTextEntry?.isLocked == true
+        return Button(action: {
+            if let entry = selectedTextEntry {
+                toggleNoteLock(entry)
+            }
+        }) {
+            Image(systemName: isLocked ? "lock.fill" : "lock.open")
+                .foregroundColor(isHoveringLock ? textHoverColor : textColor)
+                .frame(width: 14, height: 14)
+        }
+        .buttonStyle(.plain)
+        .disabled(selectedTextEntry == nil || storage.isTransferring)
+        .accessibilityLabel(isLocked ? "Unlock note" : "Lock note")
+        .accessibilityValue(isLocked ? "Locked" : "Not locked")
+        .accessibilityIdentifier("lockNoteButton")
+        .help(isLocked ? "This note is locked. Click to unlock it for good." : "Lock this note: encrypt it and require Touch ID to open it")
+        .onHover { hovering in
+            isHoveringLock = hovering
+            hoverCursor(hovering)
+        }
+    }
+
+    /// Shown instead of the editor while the selected locked note is closed.
+    private var lockedNotePlaceholder: some View {
+        let entry = selectedTextEntry
+        let keyID = entry.flatMap { versionStore.lockKeyID(of: $0.filename) }
+        let lockedElsewhere = keyID.map { !noteLock.hasKey($0) } ?? false
+        return VStack(spacing: 14) {
+            Image(systemName: "lock.fill")
+                .font(.system(size: 26, weight: .light))
+                .foregroundColor(textColor)
+            Text("This note is locked")
+                .font(.custom(selectedFont, size: fontSize))
+                .foregroundColor(colorScheme == .light ? Color(red: 0.20, green: 0.20, blue: 0.20) : Color(red: 0.9, green: 0.9, blue: 0.9))
+            if lockedElsewhere {
+                Text("It was locked on another Mac. Unlock it once with your recovery key in Settings › Privacy.")
+                    .font(.system(size: 13))
+                    .foregroundColor(textColor)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+                Button("Open Privacy Settings") {
+                    UserDefaults.standard.set("privacy", forKey: "settingsPane")
+                    openSettings()
+                }
+                .accessibilityIdentifier("openPrivacySettingsButton")
+            } else {
+                Text("Open it with Touch ID, your Apple Watch or your Mac password. It stays encrypted on disk.")
+                    .font(.system(size: 13))
+                    .foregroundColor(textColor)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+                Button(isUnlockingNotes ? "Unlocking…" : "Unlock") {
+                    openLockedNotes()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(isUnlockingNotes)
+                .accessibilityIdentifier("unlockLockedNoteButton")
+            }
+        }
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     // MARK: Versions
 
     /// The selected entry when it's a text entry shown in the editor.
@@ -1195,7 +1476,7 @@ struct ContentView: View {
     }
 
     private func showVersion(_ versionId: String) {
-        guard let entry = selectedTextEntry, let manifest = entryManifest else { return }
+        guard let entry = selectedTextEntry, !isSelectedNoteClosed, let manifest = entryManifest else { return }
         guard versionId != manifest.current else {
             showCurrentVersion()
             return
@@ -1244,7 +1525,7 @@ struct ContentView: View {
 
     /// Seals the current text as vN and continues on an empty page as vN+1.
     private func createNewVersion() {
-        guard let entry = selectedTextEntry, !voiceRecorder.isRecording else { return }
+        guard let entry = selectedTextEntry, !isSelectedNoteClosed, !voiceRecorder.isRecording else { return }
         showCurrentVersion()
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             NSSound.beep()
@@ -1356,12 +1637,12 @@ struct ContentView: View {
         let store = versionStore
         var target: HumanEntry
         var isNewEntry = false
-        if let selected = selectedTextEntry,
+        if let selected = selectedTextEntry, !isSelectedNoteClosed,
            text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (entryManifest?.versions.count ?? 1) > 1 {
             saveEntry(entry: selected)
             target = selected
         } else {
-            if let selected = selectedTextEntry {
+            if let selected = selectedTextEntry, !isSelectedNoteClosed {
                 saveEntry(entry: selected)
             }
             target = HumanEntry.createNew()
@@ -1394,6 +1675,7 @@ struct ContentView: View {
             currentVideoURL = nil
             selectedVideoHasTranscript = false
             didCopyTranscript = false
+            closeLockedNote()
             text = ""
             placeholderText = placeholderOptions.randomElement() ?? "Begin writing"
             resetVersionState(for: target)
@@ -1411,17 +1693,26 @@ struct ContentView: View {
         let progress = engine == .hex ? "Transcribing with Hex…" : "Transcribing…"
         transcriptionStatuses[entryId] = progress
         // The folder the recording was saved in. The entries folder may change while this runs.
+        // For a locked note it also holds the keys, so the transcript can be saved encrypted
+        // even if locked notes close meanwhile.
         let origin = versionStore
+        // A locked note's recording is transcribed from the plain temporary file, deleted after.
+        let audioToTranscribe = attachment.temporaryPlaintextURL ?? attachment.audioURL
         Task {
+            defer {
+                if let temporary = attachment.temporaryPlaintextURL {
+                    try? FileManager.default.removeItem(at: temporary)
+                }
+            }
             do {
-                let transcript = try await engine.transcribe(fileURL: attachment.audioURL)
+                let transcript = try await engine.transcribe(fileURL: audioToTranscribe)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 // The transcript goes next to the recording wherever it is now: still in the old
                 // folder ("Just Switch"), moved, or copied (then both copies get it).
-                let current = versionStore
+                let current = EntryVersionStore(root: versionStore.root, cipher: origin.cipher)
                 let candidates = current.root == origin.root ? [origin] : [current, origin]
                 let holders = candidates.filter { store in
-                    FileManager.default.fileExists(atPath: store.url(forRelativePath: attachment.audioPath, entryFilename: entryFilename).path)
+                    store.fileExists(atRelativePath: attachment.audioPath, entryFilename: entryFilename)
                 }
                 guard let store = holders.first else {
                     showStatus("The voice note was moved before its transcript finished.", for: entryId)
@@ -1442,12 +1733,12 @@ struct ContentView: View {
                     showStatus("Transcript saved with \(attachment.versionId).", for: entryId)
                     return
                 }
-                if store.root == current.root && selectedEntryId == entryId && currentVideoURL == nil {
+                let isOpenHere = !store.isLocked(entryFilename) || openLockedNoteId == entryId
+                if store.root == current.root && selectedEntryId == entryId && currentVideoURL == nil && isOpenHere {
                     text = appending(transcript, to: text)  // autosaved like typing
                 } else {
-                    let url = store.entryFileURL(for: entryFilename)
-                    let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-                    try appending(transcript, to: existing).write(to: url, atomically: true, encoding: .utf8)
+                    let existing = (try? store.currentText(for: entryFilename)) ?? ""
+                    try store.saveCurrentText(appending(transcript, to: existing), for: entryFilename)
                     if store.root == current.root, let entry = entries.first(where: { $0.id == entryId }) {
                         updatePreviewText(for: entry)
                     }
@@ -1465,6 +1756,19 @@ struct ContentView: View {
         guard !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return transcript }
         let body = existing.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
         return body + "\n\n" + transcript
+    }
+
+    /// Plays or pauses a voice note of the selected entry (decrypted in memory for a locked note).
+    private func toggleVoiceNote(_ url: URL) {
+        guard let entry = selectedTextEntry, entry.isLocked else {
+            voicePlayer.toggle(url)
+            return
+        }
+        guard !isSelectedNoteClosed else { return }
+        let store = versionStore
+        voicePlayer.toggle(url) {
+            try store.readData(url, entryFilename: entry.filename)
+        }
     }
 
     private func audioURL(for version: EntryVersion) -> URL? {
@@ -1528,6 +1832,9 @@ struct ContentView: View {
                         .id(videoURL.path)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .ignoresSafeArea(edges: .top)
+                } else if isSelectedNoteClosed {
+                    lockedNotePlaceholder
+                        .padding(.bottom, navHeight)
                 } else {
                     // Show text editor for text entries
                     // Accessibility label/identifier ("Entry text" / "editor") live on the NSTextView.
@@ -1762,14 +2069,23 @@ struct ContentView: View {
 
                                         VStack(alignment: .leading, spacing: 4) {
                                             HStack {
-                                                Text(entry.previewText.isEmpty && entry.hasVoiceNote ? "Voice Note" : entry.previewText)
-                                                    .font(.system(size: 13))
-                                                    .lineLimit(1)
-                                                    .foregroundColor(.primary)
+                                                if entry.isLocked {
+                                                    // Never a preview: the text is encrypted.
+                                                    Label("Locked note", systemImage: "lock.fill")
+                                                        .labelStyle(.titleAndIcon)
+                                                        .font(.system(size: 13))
+                                                        .lineLimit(1)
+                                                        .foregroundColor(.primary)
+                                                } else {
+                                                    Text(entry.previewText.isEmpty && entry.hasVoiceNote ? "Voice Note" : entry.previewText)
+                                                        .font(.system(size: 13))
+                                                        .lineLimit(1)
+                                                        .foregroundColor(.primary)
+                                                }
 
                                                 Spacer()
 
-                                                if hoveredEntryId != entry.id {
+                                                if hoveredEntryId != entry.id && !entry.isLocked {
                                                     historyBadges(for: entry)
                                                 }
                                                 
@@ -1851,7 +2167,20 @@ struct ContentView: View {
                                     NSCursor.pop()  // Reset cursor when button appears
                                 }
                                 .help("Click to select this entry")  // Add tooltip
-                                .accessibilityLabel("\(entry.previewText.isEmpty ? (entry.hasVoiceNote ? "Voice note" : "Empty entry") : entry.previewText), \(entry.date)\(entry.versionCount > 1 ? ", \(entry.versionCount) versions" : "")")
+                                .contextMenu {
+                                    if entry.entryType == .video {
+                                        Button("Lock Note (not available for videos yet)") {}
+                                            .disabled(true)
+                                    } else {
+                                        Button(entry.isLocked ? "Unlock Note…" : "Lock Note") {
+                                            toggleNoteLock(entry)
+                                        }
+                                        .disabled(storage.isTransferring || !noteLock.isAvailable)
+                                    }
+                                }
+                                .accessibilityLabel(entry.isLocked
+                                    ? "Locked note, \(entry.date)"
+                                    : "\(entry.previewText.isEmpty ? (entry.hasVoiceNote ? "Voice note" : "Empty entry") : entry.previewText), \(entry.date)\(entry.versionCount > 1 ? ", \(entry.versionCount) versions" : "")")
                                 .accessibilityAddTraits(selectedEntryId == entry.id ? .isSelected : [])
                                 .accessibilityIdentifier("historyRow-\(entry.id.uuidString)")
                                 
@@ -1919,8 +2248,37 @@ struct ContentView: View {
             reviews.stopReviews(outside: storage.rootURL)
             flushAnnotationAnchors()
             currentVideoURL = nil
+            closeLockedNote()
             resetVersionState(for: nil)
             loadExistingEntries()
+        }
+        .onChange(of: noteLock.isUnlocked) { _, isUnlocked in
+            if isUnlocked {
+                // Opened (here or from Settings): show the selected locked note.
+                if let entry = selectedTextEntry, entry.isLocked, openLockedNoteId != entry.id {
+                    loadEntry(entry: entry)
+                }
+            } else if let entry = selectedTextEntry, entry.isLocked {
+                // Closed after idle/sleep: every edit is already saved, so just forget the text.
+                closeLockedNote()
+                resetVersionState(for: entry)
+                text = ""
+            }
+        }
+        .sheet(item: $recoverySetup) { request in
+            RecoveryKeySheet(recoveryKey: request.recoveryKey, mode: .setUp) { confirmed in
+                recoverySetup = nil
+                guard confirmed else { return }
+                do {
+                    try noteLock.createVault(recovery: request.recoveryKey)
+                } catch {
+                    showStatus("Couldn't set up locking: \(error.localizedDescription)")
+                    return
+                }
+                if let entry = entries.first(where: { $0.id == request.entryId }) {
+                    lockNote(entry)
+                }
+            }
         }
         .alert("Entries Folder Unavailable", isPresented: Binding(
             get: { storage.unavailableFolderNotice != nil },
@@ -1946,7 +2304,7 @@ struct ContentView: View {
             }
         }
         .onChange(of: text) {
-            // Save current entry when text changes
+            // Save current entry when text changes (a locked one only while it's open, encrypted)
             if let currentId = selectedEntryId,
                let currentEntry = entries.first(where: { $0.id == currentId }),
                currentEntry.entryType == .text {
@@ -1963,6 +2321,10 @@ struct ContentView: View {
             }
         }
         .onReceive(timer) { _ in
+            // A long voice note isn't "idle": keep locked notes open while it records.
+            if voiceRecorder.isRecording {
+                noteLock.noteActivity()
+            }
             if timerIsRunning && timeRemaining > 0 {
                 timeRemaining -= 1
             } else if timeRemaining == 0 {
@@ -2027,12 +2389,12 @@ struct ContentView: View {
     /// Fixed start of the left side for text entries: the current version's voice note and
     /// transient status (transcribing, errors).
     private var textEntryStatusVisible: Bool {
-        transcriptionStatus != nil || runningReview != nil || (viewedVersion == nil && entryManifest?.currentVersion.flatMap(audioURL(for:)) != nil)
+        transcriptionStatus != nil || runningReview != nil || (viewedVersion == nil && !isSelectedNoteClosed && entryManifest?.currentVersion.flatMap(audioURL(for:)) != nil)
     }
 
     @ViewBuilder
     private func textEntryStatus(textColor: Color, textHoverColor: Color) -> some View {
-        if viewedVersion == nil, let current = entryManifest?.currentVersion, !audioURLs(for: current).isEmpty {
+        if viewedVersion == nil, !isSelectedNoteClosed, let current = entryManifest?.currentVersion, !audioURLs(for: current).isEmpty {
             playVoiceNotes(audioURLs(for: current), textColor: textColor, textHoverColor: textHoverColor)
         }
         if let transcriptionStatus {
@@ -2159,7 +2521,7 @@ struct ContentView: View {
             Menu {
                 ForEach(Array(urls.enumerated()), id: \.element) { index, url in
                     Button(voicePlayer.url == url && voicePlayer.isPlaying ? "Pause voice note \(index + 1)" : "Play voice note \(index + 1)") {
-                        voicePlayer.toggle(url)
+                        toggleVoiceNote(url)
                     }
                 }
             } label: {
@@ -2186,7 +2548,7 @@ struct ContentView: View {
     private func playVoiceNoteButton(url: URL, textColor: Color, textHoverColor: Color) -> some View {
         let isPlaying = voicePlayer.url == url && voicePlayer.isPlaying
         return Button(action: {
-            voicePlayer.toggle(url)
+            toggleVoiceNote(url)
         }) {
             HStack(spacing: 4) {
                 Image(systemName: isPlaying ? "pause.fill" : "play.fill")
@@ -2340,6 +2702,9 @@ struct ContentView: View {
             return
         }
 
+        // A locked note never gets a preview (it would leak its first words into the sidebar).
+        guard !entry.isLocked else { return }
+
         let documentsDirectory = getDocumentsDirectory()
         let fileURL = documentsDirectory.appendingPathComponent(entry.filename)
         
@@ -2365,6 +2730,19 @@ struct ContentView: View {
         guard entry.entryType == .text else {
             return false
         }
+        if entry.isLocked {
+            // Only the open note, and only encrypted: `text` is empty while it's closed.
+            guard openLockedNoteId == entry.id else { return false }
+            guard lockedNoteSavedText != text else { return true }
+            do {
+                try versionStore.saveCurrentText(text, for: entry.filename)
+                lockedNoteSavedText = text
+                return true
+            } catch {
+                print("Error saving locked entry: \(error)")
+                return false
+            }
+        }
 
         let documentsDirectory = getDocumentsDirectory()
         let fileURL = documentsDirectory.appendingPathComponent(entry.filename)
@@ -2382,6 +2760,7 @@ struct ContentView: View {
     
     private func loadEntry(entry: HumanEntry) {
         resetVersionState(for: entry)
+        closeLockedNote()
         if let videoFilename = resolvedVideoFilename(for: entry) {
             // Load video entry
             let videoURL = getVideoURL(for: videoFilename)
@@ -2403,6 +2782,26 @@ struct ContentView: View {
             currentVideoURL = nil
             selectedVideoHasTranscript = false
             didCopyTranscript = false
+            if entry.isLocked {
+                // Decrypted into memory only, and only while locked notes are open.
+                let store = versionStore
+                guard store.cipher != nil else {
+                    text = ""
+                    return
+                }
+                do {
+                    let rawText = try store.currentText(for: entry.filename)
+                    store.removeLeftoverPlainFiles(of: entry.filename)
+                    let loaded = String(rawText.drop(while: { $0 == "\n" }))
+                    lockedNoteSavedText = loaded
+                    openLockedNoteId = entry.id
+                    text = loaded
+                } catch {
+                    text = ""
+                    showStatus(error.localizedDescription, for: entry.id)
+                }
+                return
+            }
             let documentsDirectory = getDocumentsDirectory()
             let fileURL = documentsDirectory.appendingPathComponent(entry.filename)
 
@@ -2426,6 +2825,7 @@ struct ContentView: View {
         currentVideoURL = nil
         selectedVideoHasTranscript = false
         didCopyTranscript = false
+        closeLockedNote()
         resetVersionState(for: nil)
         historyDebug("NEW ENTRY created \(debugEntrySummary(newEntry))")
         logEntriesOrder("createNewEntry")
@@ -2469,7 +2869,7 @@ struct ContentView: View {
         let replacementEntry = selectedEntryId
             .flatMap { id in entries.first(where: { $0.id == id }) }
             .flatMap { entry -> HumanEntry? in
-                guard entry.entryType == .text else { return nil }
+                guard entry.entryType == .text, !entry.isLocked else { return nil }
                 guard text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
                 // An entry with versions or a voice note keeps them; the video gets its own entry.
                 guard entryManifest?.isInteresting != true else { return nil }
@@ -2645,14 +3045,22 @@ struct ContentView: View {
             NSSound.beep()
             return
         }
-        // Delete the file from the filesystem
+        // Delete the file from the filesystem (`.fwlock` for a locked note)
         let documentsDirectory = getDocumentsDirectory()
-        let fileURL = documentsDirectory.appendingPathComponent(entry.filename)
+        let plainURL = documentsDirectory.appendingPathComponent(entry.filename)
+        let lockedURL = versionStore.lockedEntryFileURL(for: entry.filename)
         // A review still running would write notes and a summary for an entry that's gone.
         reviews.stopReviews(of: entry.filename, in: documentsDirectory)
 
         do {
-            try fileManager.removeItem(at: fileURL)
+            if entry.isLocked {
+                try fileManager.removeItem(at: lockedURL)
+                // A plain copy left behind by an interrupted lock goes too.
+                try? fileManager.removeItem(at: plainURL)
+                if openLockedNoteId == entry.id { closeLockedNote() }
+            } else {
+                try fileManager.removeItem(at: plainURL)
+            }
             print("Successfully deleted file: \(entry.filename)")
 
             // If this is a video entry, also delete the video file
@@ -2730,13 +3138,15 @@ struct ContentView: View {
             saveEntry(entry: entry)
         }
         
-        // Get entry content
-        let documentsDirectory = getDocumentsDirectory()
-        let fileURL = documentsDirectory.appendingPathComponent(entry.filename)
-        
+        // Get entry content (a locked note only while it's open; the PDF is a plain copy the user asked for)
+        if entry.isLocked && !noteLock.isUnlocked {
+            showStatus("Open the locked note before exporting it.", for: selectedEntryId)
+            return
+        }
+
         do {
             // Read the content of the entry
-            let entryContent = try String(contentsOf: fileURL, encoding: .utf8)
+            let entryContent = try versionStore.currentText(for: entry.filename)
             
             // Extract a title from the entry content and add .pdf extension
             let suggestedFilename = extractTitleFromContent(entryContent, date: entry.date) + ".pdf"

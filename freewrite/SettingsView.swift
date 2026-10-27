@@ -47,6 +47,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
     case recordVideo
     case recordVoiceNote
     case reviewEntry
+    case toggleNoteLock
     case toggleBackspace
     case toggleTheme
     case increaseFontSize
@@ -65,6 +66,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .recordVideo: return "Record Video"
         case .recordVoiceNote: return "Record Voice Note"
         case .reviewEntry: return "Review with…"
+        case .toggleNoteLock: return "Lock/Unlock Note"
         case .toggleBackspace: return "Toggle Backspace"
         case .toggleTheme: return "Toggle Light/Dark"
         case .increaseFontSize: return "Bigger Text"
@@ -83,6 +85,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .recordVideo: return KeyShortcut(key: "r", modifiers: [.command, .shift])
         case .recordVoiceNote: return KeyShortcut(key: "v", modifiers: [.command, .shift])
         case .reviewEntry: return KeyShortcut(key: "e", modifiers: [.command, .shift])
+        case .toggleNoteLock: return KeyShortcut(key: "l", modifiers: [.command, .control])
         case .toggleBackspace: return KeyShortcut(key: "b", modifiers: [.command, .shift])
         case .toggleTheme: return KeyShortcut(key: "l", modifiers: [.command, .shift])
         case .increaseFontSize: return KeyShortcut(key: "=", modifiers: [.command])
@@ -269,6 +272,7 @@ struct FreewriteCommands: Commands {
             button(for: .recordVoiceNote)
             Divider()
             button(for: .reviewEntry)
+            button(for: .toggleNoteLock)
         }
         CommandGroup(after: .sidebar) {
             button(for: .toggleHistory)
@@ -310,6 +314,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case permissions
     case agents
     case bottomBar
+    case privacy
     case shortcuts
     case about
 
@@ -346,6 +351,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .permissions: return "Permissions"
         case .bottomBar: return "Bottom Bar"
         case .agents: return "Agents"
+        case .privacy: return "Privacy"
         case .shortcuts: return "Shortcuts"
         case .about: return "About"
         }
@@ -359,6 +365,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .permissions: return "hand.raised.fill"
         case .bottomBar: return "dock.rectangle"
         case .agents: return "sparkles"
+        case .privacy: return "lock.fill"
         case .shortcuts: return "command"
         case .about: return "info"
         }
@@ -372,6 +379,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .permissions: return .green
         case .bottomBar: return .indigo
         case .agents: return .purple
+        case .privacy: return .blue
         case .shortcuts: return .orange
         case .about: return .gray
         }
@@ -458,6 +466,7 @@ struct SettingsView: View {
         case .permissions: PermissionsSettingsView()
         case .bottomBar: BottomBarSettingsView()
         case .agents: AgentsSettingsView()
+        case .privacy: PrivacySettingsView()
         case .shortcuts: ShortcutSettingsView()
         case .about: AboutSettingsView()
         }
