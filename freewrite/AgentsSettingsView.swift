@@ -10,6 +10,30 @@
 import AppKit
 import SwiftUI
 
+/// A client's logo, tinted like text (template image), or a terminal symbol for "other".
+struct AgentClientLogo: View {
+    let client: AgentClient
+    var size: CGFloat = 16
+
+    var body: some View {
+        Group {
+            if let name = client.logoAssetName {
+                Image(name)
+                    .renderingMode(.template)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+            } else {
+                Image(systemName: "terminal")
+                    .resizable()
+                    .scaledToFit()
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+}
+
 struct AgentsSettingsView: View {
     private let server = AgentServer.shared
     @State private var connecting: AgentClient?
@@ -53,8 +77,13 @@ struct AgentsSettingsView: View {
 
     private func row(_ client: AgentClient) -> some View {
         SettingsCardRow {
-            Text(client.title)
+            HStack(spacing: 8) {
+                AgentClientLogo(client: client, size: 16)
+                    .foregroundStyle(.primary)
+                Text(client.title)
+            }
             status(client)
+                .padding(.leading, 24)
         } control: {
             if server.records[client] != nil {
                 HStack(spacing: 6) {
@@ -151,8 +180,11 @@ private struct ConnectSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Connect \(client.title)")
-                .font(.title3.weight(.semibold))
+            HStack(spacing: 10) {
+                AgentClientLogo(client: client, size: 22)
+                Text("Connect \(client.title)")
+                    .font(.title3.weight(.semibold))
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("1. " + instructions.0)

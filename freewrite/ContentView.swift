@@ -4078,7 +4078,8 @@ extension ContentView {
         if let summary = reviewSummaries[version.id] {
             cards.append(CommentCardItem(
                 id: "summary-\(version.id)", title: "Reply", color: .secondaryLabelColor,
-                comment: summary.summary, byline: summary.reviewerName, style: .summary, isAnchored: false))
+                comment: summary.summary, byline: summary.reviewerName,
+                bylineClient: AgentClient.named(in: summary.reviewerName), style: .summary, isAnchored: false))
         }
         let notes = annotations.filter { $0.versionId == version.id }
         let shown = notes.filter { note in
@@ -4107,6 +4108,7 @@ extension ContentView {
                 comment: note.comment,
                 detail: detail,
                 byline: byline(note),
+                bylineClient: AgentClient(rawValue: note.reviewerId),
                 highlightHidden: note.status == .active && !note.isPageNote ? (note.hideHighlight ?? false) : nil,
                 style: note.status == .resolved ? .resolved : .open,
                 isAnchored: !note.isPageNote && (note.anchor.map { NSMaxRange($0.range) <= textLength } ?? false)))

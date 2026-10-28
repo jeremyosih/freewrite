@@ -112,8 +112,9 @@ struct CommentCardItem: Identifiable, Equatable {
     let color: NSColor
     let comment: String
     var detail: String? = nil
-    /// Who wrote it ("Friend · Claude Code"), under the comment.
+    /// Who wrote it ("Friend · Claude Code"), under the comment, after the agent's logo.
     var byline: String? = nil
+    var bylineClient: AgentClient? = nil
     /// Whether the passage's highlight is hidden; nil when there's nothing to toggle (page notes,
     /// resolved notes, the reply).
     var highlightHidden: Bool? = nil
@@ -360,11 +361,16 @@ struct CommentCardView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let byline = card.byline {
-                Text(byline)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                HStack(spacing: 5) {
+                    if let client = card.bylineClient {
+                        AgentClientLogo(client: client, size: 11)
+                    }
+                    Text(byline)
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .foregroundStyle(.tertiary)
             }
         }
         .padding(.horizontal, 10)

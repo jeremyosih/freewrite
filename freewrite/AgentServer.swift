@@ -39,6 +39,17 @@ enum AgentClient: String, CaseIterable, Identifiable, Codable, Sendable {
         case .other: return "Other agent"
         }
     }
+
+    /// Black-and-white mark in Assets.xcassets/ClientLogos (template images, from the canmy.ai client
+    /// logo sheet); nil for "other", which shows a plain symbol rather than a guessed logo.
+    var logoAssetName: String? {
+        self == .other ? nil : "ClientLogos/\(rawValue)"
+    }
+
+    /// The client whose name a byline ends with ("Mentor · Claude Code" → Claude Code).
+    static func named(in byline: String) -> AgentClient? {
+        allCases.first { $0 != .other && byline.hasSuffix($0.title) }
+    }
 }
 
 struct AgentClientRecord: Codable, Equatable, Sendable {
