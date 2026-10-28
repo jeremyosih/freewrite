@@ -5,7 +5,7 @@ Open it and start typing. The timer runs, the interface fades away and every key
 as plain Markdown on your Mac.
 
 This is a fork of [farzaa/freewrite](https://github.com/farzaa/freewrite) with a rebuilt editor,
-versions, voice notes, transcription, local AI agents that comment on your writing, and a lot more settings.
+versions, voice notes, transcription, local AI agents that comment on your writing via MCP, and a lot more settings.
 
 ## Features
 
@@ -21,7 +21,7 @@ versions, voice notes, transcription, local AI agents that comment on your writi
 - **Customizable bottom bar**: choose which controls show, on which side and in what order.
 - **Keyboard shortcuts** for every action, editable in Settings.
 - **Your folder**: keep entries in the app's container or any folder you choose (Documents, iCloud Drive…). Freewrite moves or copies them for you.
-- **Agents that comment, never rewrite**: connect Claude Code, Codex, OpenCode, Claude Desktop, Cursor or any local MCP client. They read your entries, highlight passages, leave notes in the comment margin and post a reply. They can't change your text.
+- **Agents via MCP that comment, never rewrite**: Freewrite is an MCP server. Connect Claude Code, Codex, OpenCode, Claude Desktop, Cursor or any local MCP client. They read your entries, highlight passages, leave notes in the comment margin and post a reply. They can't change your text.
 - **Prompts**: Friend and Mentor (Farza's original ChatGPT and Claude prompts) and Editor come built in. Write your own in Settings; agents get them as MCP prompts.
 - **Comment margin**: notes sit beside the passage they're about, show which agent wrote them, and can be resolved, dismissed or have their highlight hidden.
 - **Links into the app**: agents give you `freewrite://` or `http://127.0.0.1:29890/…` links that open an entry, a version or a quoted passage.
@@ -50,7 +50,7 @@ Or open `freewrite.xcodeproj` in Xcode and press Run.
    `claude mcp add freewrite -s user -- /Applications/Freewrite.app/Contents/MacOS/freewrite mcp --client claude-code --token fw_…`.
 3. Ask your agent to read your open entry, or use a prompt: in Claude Code, type `/mcp__freewrite__mentor`.
 
-The agent talks to Freewrite over stdio. If Freewrite isn't running, it opens in the background.
+The agent talks to Freewrite via MCP over stdio. If Freewrite isn't running, it opens in the background.
 The ✦ menu in the bottom bar lists your connected agents and when each one last called Freewrite.
 **Disconnect** in Settings revokes an agent's token.
 
