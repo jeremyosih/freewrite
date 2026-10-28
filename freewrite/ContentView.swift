@@ -178,8 +178,6 @@ struct ContentView: View {
     // AI reviewers (Reviews.swift): notes on the selected entry, anchored to `annotationsBaseText`
     // for the current version.
     @AppStorage(PromptStore.key) private var promptsJSON = ""
-    /// The prompt "Continue in ChatGPT / Claude" uses (the last one asked for).
-    @AppStorage("lastPromptId") private var lastPromptId = ""
     @State private var annotations: [Annotation] = []
     @State private var annotationsEntryId: UUID? = nil
     @State private var annotationsBaseText = ""
@@ -4000,7 +3998,6 @@ extension ContentView {
             showStatus("Locked notes stay on this Mac.")
             return
         }
-        lastPromptId = prompt.id
         let name = PromptStore.named(prompts).first { $0.prompt.id == prompt.id }?.name ?? PromptStore.slug(prompt.name)
         let link = FreewriteLink(entryId: entry.id, versionId: version.id)
         let request = "Use the Freewrite prompt \"\(name)\" on my entry \(link.webURL) (get it with Freewrite's get_prompt tool), and link me to the passages you talk about."
@@ -4009,29 +4006,6 @@ extension ContentView {
         showStatus(AgentServer.shared.hasClients
             ? "Copied. Paste it into your agent."
             : "Copied. Connect an agent in Settings › Agents first.")
-    }
-
-    /// Opens ChatGPT or Claude on the web with the prompt and the text on screen. Too long for a
-    /// link: the prompt is copied and the site opens empty, ready to paste.
-    private func continueInChat(_ prompt: AgentPrompt, site: ChatSite) {
-        guard let entry = selectedTextEntry, !entry.isLocked else {
-            showStatus("Locked notes stay on this Mac.")
-            return
-        }
-        let body = displayedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty else {
-            showStatus("Write something first, then open a chat.")
-            return
-        }
-        let full = ExternalChat.prompt(prompt, text: body)
-        if let url = ExternalChat.url(for: site, prompt: full), url.absoluteString.count <= ExternalChat.maxURLLength {
-            NSWorkspace.shared.open(url)
-        } else {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(full, forType: .string)
-            NSWorkspace.shared.open(site.home)
-            showStatus("This entry is too long for a link: the prompt is copied, paste it in \(site.title).")
-        }
     }
 
     /// The start of a long reply, for the Review menu (the full reply is in the comments).
@@ -4191,7 +4165,7 @@ extension ContentView {
     }
 
     /// Ask an agent: a prompt per row (copies a request for a connected agent), the latest reply
-    /// for the version, Continue in ChatGPT / Claude, the notes, settings.
+    /// for the version, settings.
     private var reviewMenuContent: BarMenuContent {
         let version = displayedVersion
         let summary = selectedTextEntry.flatMap { entry in
@@ -4214,18 +4188,6 @@ extension ContentView {
         ]
         if let summary {
             sections.append(BarMenuSection(id: "summary", paragraph: Self.excerpt(summary)))
-        }
-        // A longer conversation on the web, with the last prompt asked for.
-        if let prompt = prompts.first(where: { $0.id == lastPromptId }) ?? prompts.first {
-            sections.append(BarMenuSection(
-                id: "external",
-                header: "Continue in a chat with \(prompt.name)",
-                actions: ChatSite.allCases.map { site in
-                    BarMenuAction(id: "continueIn-\(site.rawValue)", title: site.title, trailingSymbol: "arrow.up.forward") {
-                        continueInChat(prompt, site: site)
-                    }
-                }
-            ))
         }
         // Comments (show/hide, clear, highlights) live in the comment margin, not here.
         sections.append(BarMenuSection(id: "settings", actions: [

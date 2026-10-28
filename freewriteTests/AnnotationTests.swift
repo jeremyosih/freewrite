@@ -402,22 +402,6 @@ struct PromptStoreTests {
     }
 }
 
-struct ExternalChatTests {
-    @Test func promptIsPromptThenText() {
-        let prompt = AgentPrompt(name: "Friend", prompt: "  my entry:\n")
-        #expect(ExternalChat.prompt(prompt, text: "\n\nHello\n") == "my entry:\n\nHello")
-    }
-
-    @Test func urlEscapesQueryBreakingCharacters() throws {
-        let url = try #require(ExternalChat.url(for: .chatGPT, prompt: "a & b = c #1 + d?"))
-        #expect(url.absoluteString.hasPrefix("https://chatgpt.com/?q="))
-        let query = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
-        #expect(query.count == 1)
-        #expect(query.first?.value == "a & b = c #1 + d?")
-        #expect(ExternalChat.url(for: .claude, prompt: "x")?.absoluteString == "https://claude.ai/new?q=x")
-    }
-}
-
 struct FreewriteLinkTests {
     private let id = UUID(uuidString: "6910BBDE-75FC-415C-ABB9-C76644B037B2")!
 

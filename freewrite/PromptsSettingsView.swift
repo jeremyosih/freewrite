@@ -3,7 +3,7 @@
 //  freewrite
 //
 //  Settings › Prompts: a list of prompts (name + text), nothing else. Connected agents get them
-//  as MCP prompts; "Ask an agent" and "Continue in ChatGPT / Claude" use them too.
+//  as MCP prompts; "Ask an agent" copies a request naming one.
 //
 
 import SwiftUI

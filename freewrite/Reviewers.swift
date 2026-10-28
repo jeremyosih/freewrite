@@ -58,7 +58,7 @@ extension AnnotationKind {
 
 
 /// A prompt: a name and its text. Served to connected agents as MCP prompts (`/mcp__freewrite__mentor`
-/// in Claude Code), copied by "Ask an agent", and used by "Continue in ChatGPT / Claude".
+/// in Claude Code) and copied as a request by "Ask an agent".
 struct AgentPrompt: Codable, Equatable, Identifiable, Sendable {
     var id: String
     var name: String
@@ -170,55 +170,6 @@ enum PromptStore {
             .map { $0.isLetter || $0.isNumber ? String($0) : "-" }
             .joined()
             .split(separator: "-").joined(separator: "-")
-    }
-}
-
-/// A chat site on the web, for "Continue in ChatGPT / Claude".
-enum ChatSite: String, CaseIterable, Identifiable, Sendable {
-    case chatGPT, claude
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .chatGPT: return "ChatGPT"
-        case .claude: return "Claude"
-        }
-    }
-
-    var base: String {
-        switch self {
-        case .chatGPT: return "https://chatgpt.com/?q="
-        case .claude: return "https://claude.ai/new?q="
-        }
-    }
-
-    var home: URL {
-        switch self {
-        case .chatGPT: return URL(string: "https://chatgpt.com/")!
-        case .claude: return URL(string: "https://claude.ai/new")!
-        }
-    }
-}
-
-/// Opens a prompt and the writing in ChatGPT or Claude on the web. Nothing is sent from the
-/// app: the browser opens the link.
-enum ExternalChat {
-    /// Links longer than this fail in some browsers; the prompt is copied instead.
-    static let maxURLLength = 6000
-
-    static func prompt(_ prompt: AgentPrompt, text: String) -> String {
-        prompt.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-            + "\n\n" + text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// The chat site with `prompt` prefilled.
-    static func url(for site: ChatSite, prompt: String) -> URL? {
-        // Query values: escape the characters that would end or split the parameter.
-        var allowed = CharacterSet.urlQueryAllowed
-        allowed.remove(charactersIn: "&+=#?")
-        guard let encoded = prompt.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
-        return URL(string: site.base + encoded)
     }
 }
 
