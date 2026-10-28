@@ -49,6 +49,29 @@ struct EntryVersionStoreTests {
         }
     }
 
+    @Test func aNewVersionCanStartFromAnyVersion() throws {
+        let store = try makeStore()
+        // v1 "first draft" → v2 from v1 (copy) → edit → v3 blank → v4 from v2.
+        let second = try store.sealCurrent(entryFilename: entry, from: "v1")
+        #expect(second.version("v2")?.parent == "v1")
+        #expect(read(store.entryFileURL(for: entry)) == "first draft")
+        try "first draft, tightened".write(to: store.entryFileURL(for: entry), atomically: true, encoding: .utf8)
+        let third = try store.sealCurrent(entryFilename: entry)
+        #expect(third.version("v3")?.parent == nil)
+        try "something else".write(to: store.entryFileURL(for: entry), atomically: true, encoding: .utf8)
+        let fourth = try store.sealCurrent(entryFilename: entry, from: "v2")
+        #expect(read(store.entryFileURL(for: entry)) == "first draft, tightened")
+        #expect(fourth.tree.map { "\($0.version.id):\($0.depth)" } == ["v1:0", "v2:1", "v4:2", "v3:0"])
+        let log = store.log(for: entry).filter { $0.op == .versionCreate }
+        #expect(log.map(\.version) == ["v2", "v3", "v4"])
+        #expect(log.map(\.from) == ["v1", nil, "v2"])
+        #expect(log.map(\.sealed) == ["v1", "v2", "v3"])
+        #expect(log.allSatisfy { $0.actor == EntryEvent.user })
+        #expect(throws: EntryVersionStore.Failure.unknownVersion("v9")) {
+            try store.sealCurrent(entryFilename: entry, from: "v9")
+        }
+    }
+
     @Test func sealingKeepsTheTextAndStartsAnEmptyVersion() throws {
         let store = try makeStore()
         let now = Date(timeIntervalSince1970: 1_800_000_000)
@@ -181,6 +204,7 @@ struct EntryVersionStoreTests {
         #expect(StorageTransfer.items(in: store.root) == [
             "Entries/\(base)/audio/v2.m4a",
             "Entries/\(base)/entry.json",
+            "Entries/\(base)/log.jsonl",
             "Entries/\(base)/versions/v1.md",
             entry,
         ].sorted())

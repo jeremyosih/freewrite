@@ -34,7 +34,7 @@ enum BottomBarItem: String, CaseIterable, Codable, Identifiable {
         case .timer: return "Timer"
         case .recordVideo: return "Record Video"
         case .recordVoiceNote: return "Record Voice Note"
-        case .review: return "Review"
+        case .review: return "Ask an Agent"
         case .backspace: return "Backspace Toggle"
         case .fullscreen: return "Fullscreen"
         case .newEntry: return "New Entry"

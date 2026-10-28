@@ -370,19 +370,77 @@ struct ReviewToolboxTests {
     }
 }
 
-struct ReviewerStoreTests {
+struct PromptStoreTests {
     @Test func missingOrBrokenJSONGivesDefaults() {
-        #expect(ReviewerStore.decode("") == ReviewerProfile.defaults)
-        #expect(ReviewerStore.decode("{nope") == ReviewerProfile.defaults)
-        #expect(ReviewerProfile.defaults.map(\.id) == ["mirror", "editor", "coach"])
+        #expect(PromptStore.decode("") == AgentPrompt.defaults)
+        #expect(PromptStore.decode("{nope") == AgentPrompt.defaults)
+        #expect(AgentPrompt.defaults.map(\.id) == ["friend", "mentor", "editor"])
     }
 
     @Test func roundTripKeepsEdits() {
-        var profiles = ReviewerProfile.defaults
-        profiles[0].model = "anthropic/claude-opus-5-5"
-        profiles[0].thinkingLevel = "high"
-        profiles.append(ReviewerProfile(name: "Custom", instructions: "Be brief.", color: .pink, autoRunOnNewVersion: true))
-        #expect(ReviewerStore.decode(ReviewerStore.encode(profiles)) == profiles)
-        #expect(ReviewerStore.decode("[]") == [])
+        var prompts = AgentPrompt.defaults
+        prompts[0].prompt = "Be brief."
+        prompts.append(AgentPrompt(name: "Custom", prompt: "Ask me one question."))
+        #expect(PromptStore.decode(PromptStore.encode(prompts)) == prompts)
+        #expect(PromptStore.decode("[]") == [])
+    }
+
+    @Test func oldAgentFieldsAreIgnored() throws {
+        let json = """
+        [{"id":"editor","name":"Editor","prompt":"x","model":"openai/gpt-5.5","instructions":"old"},{"id":"bare","name":"Bare"}]
+        """
+        let prompts = try JSONDecoder().decode([AgentPrompt].self, from: Data(json.utf8))
+        #expect(prompts == [AgentPrompt(id: "editor", name: "Editor", prompt: "x"), AgentPrompt(id: "bare", name: "Bare", prompt: "")])
+    }
+
+    @Test func mcpNamesAreUniqueSlugs() {
+        let prompts = [
+            AgentPrompt(name: "Mentor", prompt: ""), AgentPrompt(name: "My Editor!", prompt: ""),
+            AgentPrompt(name: "mentor", prompt: ""), AgentPrompt(name: "  ", prompt: ""),
+        ]
+        #expect(PromptStore.named(prompts).map(\.name) == ["mentor", "my-editor", "mentor-2", "prompt"])
+    }
+}
+
+struct ExternalChatTests {
+    @Test func promptIsPromptThenText() {
+        let prompt = AgentPrompt(name: "Friend", prompt: "  my entry:\n")
+        #expect(ExternalChat.prompt(prompt, text: "\n\nHello\n") == "my entry:\n\nHello")
+    }
+
+    @Test func urlEscapesQueryBreakingCharacters() throws {
+        let url = try #require(ExternalChat.url(for: .chatGPT, prompt: "a & b = c #1 + d?"))
+        #expect(url.absoluteString.hasPrefix("https://chatgpt.com/?q="))
+        let query = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+        #expect(query.count == 1)
+        #expect(query.first?.value == "a & b = c #1 + d?")
+        #expect(ExternalChat.url(for: .claude, prompt: "x")?.absoluteString == "https://claude.ai/new?q=x")
+    }
+}
+
+struct FreewriteLinkTests {
+    private let id = UUID(uuidString: "6910BBDE-75FC-415C-ABB9-C76644B037B2")!
+
+    @Test func parsesBothForms() throws {
+        let app = try #require(FreewriteLink(url: URL(string: "freewrite://e/\(id.uuidString)/v2/n/an_1")!))
+        #expect(app == FreewriteLink(entryId: id, versionId: "v2", noteId: "an_1"))
+        let web = try #require(FreewriteLink(url: URL(string: "http://127.0.0.1:29890/e/\(id.uuidString)?q=a%20%26%20b&p=x")!))
+        #expect(web == FreewriteLink(entryId: id, quote: "a & b", prefix: "x"))
+        #expect(FreewriteLink(url: URL(string: "freewrite://e/not-a-uuid")!) == nil)
+        #expect(FreewriteLink(url: URL(string: "http://127.0.0.1:29890/x")!) == nil)
+    }
+
+    @Test func roundTripsThroughItsURLs() throws {
+        let link = FreewriteLink(entryId: id, versionId: "v3", quote: "1 + 1 = 2 & more?", suffix: "!")
+        #expect(FreewriteLink(url: try #require(URL(string: link.appURL))) == link)
+        #expect(FreewriteLink(url: try #require(URL(string: link.webURL))) == link)
+    }
+
+    @Test func picksTheOccurrenceWithMatchingContext() {
+        let text = "I was tired. Then work. I was tired again."
+        let range = FreewriteLink.range(of: "I was tired", prefix: "work. ", suffix: nil, in: text)
+        #expect(range == NSRange(location: 24, length: 11))
+        #expect(FreewriteLink.range(of: "i WAS tired", prefix: nil, suffix: nil, in: text) == NSRange(location: 0, length: 11))
+        #expect(FreewriteLink.range(of: "absent", prefix: nil, suffix: nil, in: text) == nil)
     }
 }

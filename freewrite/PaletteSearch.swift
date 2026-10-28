@@ -145,7 +145,7 @@ enum PaletteSearch {
     }
 
     /// Titles containing the query come first, then titles matching it by word starts
-    /// ("nv" → New Version, "rec vid" → Record Video, "rwe" → Review with Editor).
+    /// ("nv" → New Version, "rec vid" → Record Video, "aae" → Ask an Agent: Editor).
     static func commands(query: String, reviewActions: PaletteReviewActions = .none) -> [PaletteItem] {
         let reviewItems: [PaletteItem] = reviewActions.reviewers.map { .review($0, versionId: reviewActions.versionId) }
             + (reviewActions.noteCount > 0 ? [.clearReview(noteCount: reviewActions.noteCount)] : [])
@@ -171,9 +171,9 @@ enum PaletteSearch {
         switch item {
         case .entry(let document, _): return document.title
         case .command(let command): return command.title
-        case .review(let reviewer, _): return "Review with \(reviewer.name)"
+        case .review(let reviewer, _): return "Ask an Agent: \(reviewer.name)"
         case .clearReview(let count): return "Clear Review (\(count == 1 ? "1 note" : "\(count) notes"))"
-        case .reviewerSettings: return "Reviewers & Models…"
+        case .reviewerSettings: return "Agents…"
         case .settings: return "Settings…"
         }
     }

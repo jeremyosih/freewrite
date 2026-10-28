@@ -21,7 +21,7 @@ struct PaletteSearchTests {
         let results = PaletteSearch.results(for: "  ", in: PaletteIndex(entries))
         #expect(titles(Array(results.prefix(8))) == (0..<8).map { "Entry \($0)" })
         let actions = results.dropFirst(8)
-        #expect(actions.count == AppCommand.allCases.count + 1) // every command but the palette, Reviewers & Models…, Settings
+        #expect(actions.count == AppCommand.allCases.count + 1) // every command but the palette, Agents…, Settings
         #expect(!actions.contains { $0.id == "command-commandPalette" })
         #expect(actions.last?.id == "settings")
     }
@@ -98,17 +98,17 @@ struct PaletteSearchTests {
             noteCount: 3
         )
         let index = PaletteIndex([document("Editorial thoughts")], reviewActions: actions)
-        #expect(titles(PaletteSearch.results(for: "review with", in: index)) == ["Review with…", "Review with Editor", "Review with Mirror"])
-        #expect(titles(PaletteSearch.results(for: "rwm", in: index)).first == "Review with Mirror")
+        #expect(titles(PaletteSearch.results(for: "ask an agent", in: index)) == ["Ask an Agent…", "Ask an Agent: Editor", "Ask an Agent: Mirror"])
+        #expect(titles(PaletteSearch.results(for: "aaam", in: index)).first == "Ask an Agent: Mirror")
         #expect(titles(PaletteSearch.results(for: "clear", in: index)) == ["Clear Review (3 notes)"])
         let empty = titles(PaletteSearch.results(for: "", in: index))
-        #expect(empty.contains("Review with Editor") && empty.contains("Reviewers & Models…"))
+        #expect(empty.contains("Ask an Agent: Editor") && empty.contains("Agents…"))
     }
 
     @Test func noReviewersWithoutSomethingToReview() {
         let titles = titles(PaletteSearch.results(for: "review", in: PaletteIndex([])))
-        #expect(!titles.contains { $0.hasPrefix("Review with ") || $0.hasPrefix("Clear Review") })
-        #expect(titles.contains("Reviewers & Models…"))
+        #expect(!titles.contains { $0.hasPrefix("Ask an Agent: ") || $0.hasPrefix("Clear Review") })
+        #expect(titles.contains("Agents…"))
     }
 
     @Test func cancelledSearchStopsEarly() async {

@@ -32,6 +32,8 @@ final class CommentMarginModel {
     var activeId: String?
     /// Scrolls the editor to a note's passage (installed by the editor).
     @ObservationIgnored var reveal: ((String) -> Void)?
+    /// Scrolls the editor to any passage and flashes it (links that point at a quote).
+    @ObservationIgnored var revealRange: ((NSRange) -> Void)?
     /// How far the cards are scrolled up inside the column, for cards pushed below its bottom
     /// (e.g. many page notes on a short entry). Applied only up to `maxCardLift`.
     var cardLiftRequest: CGFloat = 0
@@ -101,7 +103,7 @@ struct CommentCardItem: Identifiable, Equatable {
         case open
         /// Shown under "Resolved": Reopen, Copy.
         case resolved
-        /// The review's closing summary: Copy only.
+        /// The agent's reply that ends a review: Copy only.
         case summary
     }
 
@@ -283,6 +285,28 @@ struct CommentCardView: View {
 
     private var kindColor: Color { Color(nsColor: card.color) }
 
+    /// Replies are markdown (headings and lists show as plain lines, emphasis and links render);
+    /// notes are plain text.
+    private var displayedComment: AttributedString {
+        guard card.style == .summary,
+              let markdown = try? AttributedString(
+                markdown: card.comment,
+                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else {
+            return AttributedString(card.comment)
+        }
+        return markdown
+    }
+
+    /// Resolved notes and long replies stay short until their card is clicked or hovered.
+    private var collapsedLineLimit: Int? {
+        guard !isEmphasized else { return nil }
+        switch card.style {
+        case .resolved: return 2
+        case .summary: return 8
+        case .open: return nil
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
@@ -303,9 +327,9 @@ struct CommentCardView: View {
                 actions
             }
             .frame(height: 18)
-            Text(card.comment)
+            Text(displayedComment)
                 .font(.system(size: 13))
-                .lineLimit(card.style == .resolved && !isEmphasized ? 2 : nil)
+                .lineLimit(collapsedLineLimit)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
             if let detail = card.detail {

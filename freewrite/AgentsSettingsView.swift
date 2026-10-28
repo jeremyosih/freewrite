@@ -2,631 +2,211 @@
 //  AgentsSettingsView.swift
 //  freewrite
 //
-//  Settings › Agents: model providers (Claude API key, ChatGPT sign-in or OpenAI key) on top,
-//  then reviewer profiles in two columns: the list on the left, the selected one's editor on the right.
-//  "New by Chat…" / "Edit with Chat…" open the reviewer chat (ReviewerChatView.swift) as a sheet.
+//  Settings › Agents: connect local agents (Claude Code, Codex, OpenCode, …) to Freewrite.
+//  Each client gets a one-line command or config snippet with its own token; the row turns green
+//  the moment that agent makes its first call. Agents read; they can't change your writing.
 //
 
-import PiDurableKit
+import AppKit
 import SwiftUI
 
 struct AgentsSettingsView: View {
-    @ObservedObject private var reviews = ReviewService.shared
-    @AppStorage(ReviewerStore.key) private var reviewersJSON = ""
-
-    @State private var keyDrafts: [ReviewProvider: String] = [:]
-    @State private var providerMessages: [ReviewProvider: String] = [:]
-    @State private var signingIn = false
-    @State private var showingOpenAIKey = false
-    @State private var models: [ReviewProvider: [ModelInfo]] = [:]
-    @State private var selectedId: String?
-    @State private var profilePendingDeletion: ReviewerProfile?
-    private let chatLauncher = ReviewerChatLauncher.shared
-
-    private var profiles: [ReviewerProfile] { ReviewerStore.decode(reviewersJSON) }
-
-    private var selectedProfile: ReviewerProfile? {
-        let profiles = profiles
-        return profiles.first { $0.id == selectedId } ?? profiles.first
-    }
+    private let server = AgentServer.shared
+    @State private var connecting: AgentClient?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SettingsCard {
-                anthropicRow
-                openAIRow
-                if showingOpenAIKey, !(reviews.credentialStates[.openAI]?.isConfigured ?? false) {
-                    SettingsCardRow("OpenAI API key", subtitle: "Used instead of a ChatGPT sign-in") {
-                        keyField(.openAI)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                SettingsFootnote("Let AI agents on this Mac read your entries and point you to passages with links. They start from the entry open in Freewrite. They can't change your writing, and locked notes are never shared.")
+                    .padding(.horizontal, 4)
+                    .padding(.bottom, 4)
+
+                if let problem = server.problem {
+                    Label(problem, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 4)
+                }
+                if let warning = Self.locationWarning {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 4)
+                }
+
+                SettingsCard {
+                    ForEach(AgentClient.allCases) { client in
+                        row(client)
                     }
                 }
-                ForEach(ReviewProvider.allCases.filter { providerMessages[$0] != nil }) { provider in
-                    messageText(providerMessages[provider] ?? "")
-                }
-            }
-            SettingsFootnote("Reviews are the one feature that sends your writing off this Mac: the entry's versions go to the provider you choose, under their privacy terms, only when you start a review or turn on auto-run. Keys and sign-ins stay in your Mac's Keychain.")
-                .padding(.horizontal, 4)
-                .padding(.bottom, 6)
 
-            HStack(alignment: .top, spacing: 12) {
-                reviewerList
-                    .frame(width: 190)
-                if let profile = selectedProfile {
-                    ReviewerEditor(profile: binding(for: profile), models: models)
-                        .id(profile.id)
-                } else {
-                    ContentUnavailableView("No Reviewers", systemImage: "sparkles", description: Text("Add one with +."))
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+                SettingsFootnote("Agents only work while Freewrite is open; if it's closed, connecting opens it in the background. Agents can see every entry that isn't locked.")
+                    .padding(.horizontal, 4)
             }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 10)
-        .padding(.bottom, 16)
-        .task {
-            await reviews.refreshCredentials()
-            await loadModels()
-        }
-        // The reviewer on screen, not `selectedId` (nil until a row is clicked, while the first
-        // reviewer is already shown and editable).
-        .onChange(of: selectedProfile?.id) { old, _ in
-            if let old { fixUpName(of: old) }
-        }
-        .onDisappear {
-            if let id = selectedProfile?.id { fixUpName(of: id) }
-        }
-        .confirmationDialog(
-            "Delete \(profilePendingDeletion?.name ?? "reviewer")?",
-            isPresented: Binding(get: { profilePendingDeletion != nil }, set: { if !$0 { profilePendingDeletion = nil } })
-        ) {
-            Button("Delete", role: .destructive) {
-                if let profile = profilePendingDeletion {
-                    let remaining = profiles.filter { $0.id != profile.id }
-                    reviewersJSON = ReviewerStore.encode(remaining)
-                    selectedId = remaining.first?.id
-                }
-                profilePendingDeletion = nil
-            }
-        } message: {
-            Text("Notes it already left stay on your entries.")
-        }
-        .sheet(item: Binding(get: { chatLauncher.chat }, set: { chatLauncher.chat = $0 })) { chat in
-            ReviewerChatSheet(chat: chat, modelName: modelName(id:), onSave: { profile in
-                save(profile)
-                selectedId = profile.id
-            }, onClose: { chatLauncher.chat = nil })
+        .sheet(item: $connecting) { client in
+            ConnectSheet(client: client) { connecting = nil }
         }
     }
 
-    // MARK: Providers
-
-    private var anthropicRow: some View {
+    private func row(_ client: AgentClient) -> some View {
         SettingsCardRow {
-            Text(ReviewProvider.anthropic.title)
-            HStack(spacing: 6) {
-                providerStatus(.anthropic)
-                Link("Get an API key", destination: URL(string: "https://platform.claude.com/settings/keys")!)
-            }
+            Text(client.title)
+            status(client)
         } control: {
-            if case .apiKey = reviews.credentialStates[.anthropic] {
-                Button("Remove Key") { remove(.anthropic) }
+            if server.records[client] != nil {
+                HStack(spacing: 6) {
+                    Button("Setup…") { connecting = client }
+                    Menu {
+                        Button("New Token") {
+                            server.rotateToken(client)
+                            connecting = client
+                        }
+                        Button("Disconnect", role: .destructive) { server.disconnect(client) }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .accessibilityLabel("More for \(client.title)")
+                }
             } else {
-                keyField(.anthropic)
-            }
-        }
-    }
-
-    private var openAIRow: some View {
-        SettingsCardRow {
-            Text(ReviewProvider.openAI.title)
-            providerStatus(.openAI)
-        } control: {
-            switch reviews.credentialStates[.openAI] ?? ProviderCredentialState.none {
-            case .signedIn:
-                Button("Sign Out") { remove(.openAI) }
-            case .apiKey:
-                Button("Remove Key") { remove(.openAI) }
-            default:
-                HStack(spacing: 8) {
-                    if signingIn {
-                        ProgressView().controlSize(.small)
-                    }
-                    Button(signingIn ? "Waiting for the browser…" : "Sign in with ChatGPT") { signIn() }
-                        .disabled(signingIn)
-                    Button(showingOpenAIKey ? "Hide Key" : "API Key…") { showingOpenAIKey.toggle() }
+                Button("Connect") {
+                    server.connect(client)
+                    connecting = client
                 }
+                .accessibilityIdentifier("connect-\(client.rawValue)")
             }
         }
     }
 
     @ViewBuilder
-    private func providerStatus(_ provider: ReviewProvider) -> some View {
-        Group {
-            switch reviews.credentialStates[provider] ?? ProviderCredentialState.none {
-            case .none:
-                Text("Not set up")
-            case .apiKey(let masked):
-                Label("API key \(masked)", systemImage: "checkmark.circle.fill")
+    private func status(_ client: AgentClient) -> some View {
+        if let record = server.records[client] {
+            if let seen = record.lastSeen {
+                Label("Connected · last call \(seen.formatted(.relative(presentation: .named)))", systemImage: "circle.fill")
                     .foregroundStyle(.green)
-            case .signedIn:
-                Label("Signed in with ChatGPT", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            case .error(let message):
-                Label(message, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                    .lineLimit(2)
+                    .labelStyle(.titleAndIcon)
+                    .imageScale(.small)
+            } else {
+                Label("Waiting for its first call", systemImage: "circle.dotted")
+                    .foregroundStyle(.secondary)
+                    .labelStyle(.titleAndIcon)
             }
-        }
-        .labelStyle(.titleAndIcon)
-    }
-
-    private func keyField(_ provider: ReviewProvider) -> some View {
-        HStack(spacing: 6) {
-            SecureField("API key", text: Binding(
-                get: { keyDrafts[provider] ?? "" },
-                set: { keyDrafts[provider] = $0 }
-            ), prompt: Text(provider.keyPlaceholder))
-            .labelsHidden()
-            .frame(width: 170)
-            .onSubmit { saveKey(provider) }
-            Button("Save") { saveKey(provider) }
-                .disabled((keyDrafts[provider] ?? "").trimmingCharacters(in: .whitespaces).isEmpty)
-        }
-    }
-
-    private func messageText(_ message: String) -> some View {
-        Text(message)
-            .font(.caption)
-            .foregroundStyle(.orange)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func saveKey(_ provider: ReviewProvider) {
-        let key = keyDrafts[provider] ?? ""
-        guard !key.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        Task {
-            do {
-                try await reviews.saveAPIKey(key, for: provider)
-                keyDrafts[provider] = ""
-                providerMessages[provider] = nil
-                if provider == .openAI { showingOpenAIKey = false }
-            } catch {
-                providerMessages[provider] = error.localizedDescription
-            }
-        }
-    }
-
-    private func remove(_ provider: ReviewProvider) {
-        Task {
-            do {
-                try await reviews.removeCredential(for: provider)
-                providerMessages[provider] = nil
-            } catch {
-                providerMessages[provider] = error.localizedDescription
-            }
-        }
-    }
-
-    private func signIn() {
-        signingIn = true
-        providerMessages[.openAI] = nil
-        Task {
-            defer { signingIn = false }
-            do {
-                try await reviews.signIn(to: .openAI)
-            } catch is CancellationError {
-                // Closed the sign-in page.
-            } catch PiDurableError.cancelled {
-                // Same, reported by the runtime.
-            } catch {
-                providerMessages[.openAI] = "Sign-in failed: \(FreewriteCredentialStore.describe(error))"
-            }
-        }
-    }
-
-    private func loadModels() async {
-        for provider in ReviewProvider.allCases where models[provider] == nil {
-            models[provider] = await reviews.availableModels(for: provider)
-                .filter { !$0.modelId.contains("realtime") }
-        }
-    }
-
-    // MARK: Reviewer list
-
-    private var reviewerList: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(spacing: 2) {
-                    ForEach(profiles) { profile in
-                        reviewerRow(profile, isSelected: profile.id == selectedProfile?.id)
-                    }
-                }
-                .padding(6)
-            }
-            Divider()
-            HStack(spacing: 2) {
-                Button {
-                    addReviewer()
-                } label: {
-                    Image(systemName: "plus")
-                        .frame(width: 22, height: 20)
-                }
-                .help("Add a reviewer")
-                .accessibilityLabel("Add Reviewer")
-                Button {
-                    profilePendingDeletion = selectedProfile
-                } label: {
-                    Image(systemName: "minus")
-                        .frame(width: 22, height: 20)
-                }
-                .disabled(selectedProfile == nil)
-                .help("Delete the selected reviewer")
-                .accessibilityLabel("Delete Reviewer")
-                Button("New by Chat…") { chatLauncher.open() }
-                    .font(.system(size: 11.5))
-                    .padding(.leading, 4)
-                    .help("Describe a reviewer and let the model set it up")
-                    .accessibilityIdentifier("newReviewerByChatButton")
-                Spacer()
-                Menu {
-                    Button("New Reviewer by Chat…") { chatLauncher.open() }
-                    if let profile = selectedProfile {
-                        Button("Edit “\(profile.name)” with Chat…") { chatLauncher.open(editing: profile) }
-                    }
-                    Divider()
-                    Button("Restore Default Reviewers") {
-                        reviewersJSON = ""
-                        selectedId = nil
-                    }
-                    .disabled(reviewersJSON.isEmpty)
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .accessibilityLabel("More")
-            }
-            .buttonStyle(.borderless)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
-        }
-        .settingsCardBackground()
-    }
-
-    private func reviewerRow(_ profile: ReviewerProfile, isSelected: Bool) -> some View {
-        Button {
-            selectedId = profile.id
-        } label: {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Circle()
-                    .fill(Color(nsColor: profile.color.nsColor))
-                    .frame(width: 8, height: 8)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(profile.name.isEmpty ? "Untitled Reviewer" : profile.name)
-                        .font(.system(size: 12, weight: .medium))
-                        .lineLimit(1)
-                    Text(modelName(profile))
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    HStack(spacing: 3) {
-                        ForEach(profile.kinds) { kind in
-                            AnnotationKindSwatch(kind: kind, size: 7)
-                        }
-                    }
-                    .accessibilityElement()
-                    .accessibilityLabel("Notes: " + profile.kinds.map(\.title).joined(separator: ", "))
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(isSelected ? Color.primary.opacity(0.09) : .clear)
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
-            Button("Edit with Chat…") {
-                selectedId = profile.id
-                chatLauncher.open(editing: profile)
-            }
-        }
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
-        .accessibilityIdentifier("reviewerRow-\(profile.id)")
-    }
-
-    private func modelName(_ profile: ReviewerProfile) -> String {
-        profile.model.isEmpty ? "Automatic model" : modelName(id: profile.model)
-    }
-
-    private func modelName(id: String) -> String {
-        for list in models.values {
-            if let model = list.first(where: { $0.id == id }) { return model.name }
-        }
-        return id
-    }
-
-    // MARK: Editing
-
-    private func binding(for profile: ReviewerProfile) -> Binding<ReviewerProfile> {
-        Binding(
-            get: { profiles.first { $0.id == profile.id } ?? profile },
-            set: { save($0) }
-        )
-    }
-
-    private func save(_ profile: ReviewerProfile) {
-        var list = profiles
-        if let index = list.firstIndex(where: { $0.id == profile.id }) {
-            list[index] = profile
         } else {
-            list.append(profile)
+            Text("Not connected")
         }
-        reviewersJSON = ReviewerStore.encode(list)
     }
 
-    private func addReviewer() {
-        let profile = ReviewerProfile(
-            name: "New Reviewer", instructions: "",
-            color: ReviewerColor.allCases[profiles.count % ReviewerColor.allCases.count])
-        save(profile)
-        selectedId = profile.id
-    }
-
-    /// Names are edited live; one left empty becomes "Untitled Reviewer" when you move on.
-    private func fixUpName(of id: String) {
-        guard var profile = profiles.first(where: { $0.id == id }) else { return }
-        let trimmed = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = trimmed.isEmpty ? "Untitled Reviewer" : trimmed
-        guard name != profile.name else { return }
-        profile.name = name
-        save(profile)
+    /// Commands point at this copy of the app; a copy run from Downloads or a disk image moves.
+    static var locationWarning: String? {
+        let path = Bundle.main.bundlePath
+        if path.contains("/AppTranslocation/") || path.hasPrefix("/Volumes/") || path.contains("/Downloads/") {
+            return "Move Freewrite to your Applications folder first: agents run it from where it is now."
+        }
+        return nil
     }
 }
 
-// MARK: - Reviewer editor
+// MARK: - Connect sheet
 
-/// The right column: everything about one reviewer, saved as you change it.
-private struct ReviewerEditor: View {
-    @Binding var profile: ReviewerProfile
-    let models: [ReviewProvider: [ModelInfo]]
+private struct ConnectSheet: View {
+    let client: AgentClient
+    let onDone: () -> Void
+    private let server = AgentServer.shared
+    @State private var copied = false
 
-    private var selectedModel: ModelInfo? {
-        models.values.lazy.compactMap { $0.first(where: { $0.id == profile.model }) }.first
-    }
+    private var token: String { server.records[client]?.token ?? "" }
+    private var executable: String { Bundle.main.executablePath ?? "/Applications/Freewrite.app/Contents/MacOS/freewrite" }
+    private var arguments: [String] { ["mcp", "--client", client.rawValue, "--token", token] }
 
-    /// The chosen model's levels (without "off"), or none for Automatic.
-    private var thinkingLevels: [String] {
-        (selectedModel?.thinkingLevels ?? []).map(\.rawValue).filter { $0 != "off" }
+    private var instructions: (String, String) {
+        let shellCommand = ([executable] + arguments).map(Self.shellQuoted).joined(separator: " ")
+        switch client {
+        case .claudeCode:
+            return ("Run this in Terminal:", "claude mcp add freewrite -s user -- \(shellCommand)")
+        case .codex:
+            return ("Run this in Terminal:", "codex mcp add freewrite -- \(shellCommand)")
+        case .openCode:
+            return ("Add this to opencode.json (\"mcp\" section):", Self.json([
+                "freewrite": ["type": "local", "command": [executable] + arguments, "enabled": true],
+            ]))
+        case .claudeDesktop:
+            return ("Add this to claude_desktop_config.json (\"mcpServers\"), then restart Claude:", Self.json([
+                "freewrite": ["command": executable, "args": arguments],
+            ]))
+        case .cursor:
+            return ("Add this to ~/.cursor/mcp.json (\"mcpServers\"):", Self.json([
+                "freewrite": ["command": executable, "args": arguments],
+            ]))
+        case .other:
+            return ("A stdio MCP server. Command and arguments:", Self.json([
+                "freewrite": ["command": executable, "args": arguments],
+            ]))
+        }
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
-                SettingsCard {
-                    SettingsCardRow("Name") {
-                        TextField("Name", text: $profile.name, prompt: Text("Mirror"))
-                            .labelsHidden()
-                            .multilineTextAlignment(.trailing)
-                            .frame(maxWidth: 170)
-                            .accessibilityIdentifier("reviewerName")
-                    }
-                    SettingsCardRow("Colour", subtitle: "Its dot in menus and lists") {
-                        Picker("Colour", selection: $profile.color) {
-                            ForEach(ReviewerColor.allCases) { color in
-                                Label {
-                                    Text(color.title)
-                                } icon: {
-                                    Image(systemName: "circle.fill")
-                                        .foregroundStyle(Color(nsColor: color.nsColor))
-                                }
-                                .tag(color)
-                            }
-                        }
-                        .labelsHidden()
-                        .fixedSize()
-                    }
-                }
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Connect \(client.title)")
+                .font(.title3.weight(.semibold))
 
-                SettingsSectionHeader("How to review", detail: "What this reviewer looks for")
-                TextEditor(text: $profile.instructions)
-                    .font(.system(size: 12))
-                    .scrollContentBackground(.hidden)
-                    .frame(height: 130)
-                    .padding(6)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("1. " + instructions.0)
+                Text(instructions.1)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .settingsCardBackground()
-                    .accessibilityIdentifier("reviewerInstructions")
-                SettingsFootnote("Freewrite already tells every reviewer to quote exactly, annotate rather than rewrite, and be kind.")
-                    .padding(.horizontal, 4)
-
-                SettingsSectionHeader("Model")
-                SettingsCard {
-                    SettingsCardRow("Model", subtitle: profile.model.isEmpty ? "Claude if set up, else ChatGPT" : nil) {
-                        Picker("Model", selection: $profile.model) {
-                            Text("Automatic").tag("")
-                            ForEach(ReviewProvider.allCases) { provider in
-                                Section(provider.title) {
-                                    ForEach(models[provider] ?? []) { model in
-                                        Text(model.name).tag(model.id)
-                                    }
-                                }
-                            }
-                            if !profile.model.isEmpty && selectedModel == nil {
-                                Text(profile.model).tag(profile.model)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(maxWidth: 180)
+                HStack {
+                    Button(copied ? "Copied" : "Copy") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(instructions.1, forType: .string)
+                        copied = true
                     }
-                    SettingsCardRow("Thinking") {
-                        Picker("Thinking", selection: Binding(
-                            get: { profile.thinkingLevel ?? "" },
-                            set: { profile.thinkingLevel = $0.isEmpty ? nil : $0 }
-                        )) {
-                            Text("Default").tag("")
-                            ForEach(thinkingLevels, id: \.self) { level in
-                                Text(level.capitalized).tag(level)
-                            }
-                        }
-                        .labelsHidden()
-                        .fixedSize()
-                        .disabled(thinkingLevels.isEmpty)
-                    }
-                    SettingsCardRow("Reads") {
-                        Picker("Reads", selection: $profile.scope) {
-                            Text("The version under review").tag(ReviewerProfile.Scope.latest)
-                            Text("All versions").tag(ReviewerProfile.Scope.all)
-                        }
-                        .labelsHidden()
-                        .fixedSize()
-                    }
-                    SettingsCardRow("Run on New Version", subtitle: "Reviews each version you seal") {
-                        Toggle("Run automatically on New Version", isOn: $profile.autoRunOnNewVersion)
-                            .labelsHidden()
-                            .toggleStyle(.switch)
-                            .controlSize(.small)
-                    }
-                }
-
-                SettingsSectionHeader("Kinds of notes", detail: "Each kind has its own highlight")
-                SettingsCard {
-                    ForEach(AnnotationKind.allCases) { kind in
-                        SettingsCardRow {
-                            HStack(spacing: 7) {
-                                AnnotationKindSample(kind: kind)
-                            }
-                            Text(kind.guidance.prefix(1).uppercased() + kind.guidance.dropFirst())
-                        } control: {
-                            Toggle(kind.title, isOn: kindBinding(kind))
-                                .labelsHidden()
-                                .toggleStyle(.switch)
-                                .controlSize(.small)
-                                .disabled(profile.kinds == [kind])
-                        }
-                    }
-                    SettingsCardRow("Default kind", subtitle: "When the model doesn't pick one") {
-                        Picker("Default kind", selection: Binding(
-                            get: { profile.effectiveDefaultKind },
-                            set: { profile.defaultKind = $0 }
-                        )) {
-                            ForEach(profile.kinds) { kind in
-                                Text(kind.title).tag(kind)
-                            }
-                        }
-                        .labelsHidden()
-                        .fixedSize()
-                    }
-                }
-
-            }
-            .padding(.bottom, 4)
-        }
-        .scrollIndicators(.automatic)
-    }
-
-    private func kindBinding(_ kind: AnnotationKind) -> Binding<Bool> {
-        Binding(
-            get: { profile.kinds.contains(kind) },
-            set: { isOn in
-                var kinds = profile.kinds.filter { $0 != kind }
-                if isOn { kinds.append(kind) }
-                guard !kinds.isEmpty else { return }
-                profile.kinds = kinds
-            }
-        )
-    }
-}
-
-// MARK: - Kinds
-
-/// A small rounded swatch in a kind's colour.
-struct AnnotationKindSwatch: View {
-    let kind: AnnotationKind
-    var size: CGFloat = 10
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
-            .fill(Color(nsColor: kind.nsColor))
-            .frame(width: size, height: size)
-            .accessibilityHidden(true)
-    }
-}
-
-/// The kind's name drawn the way the editor highlights it: tinted, and with a squiggle for grammar.
-struct AnnotationKindSample: View {
-    let kind: AnnotationKind
-
-    var body: some View {
-        Text(kind.title)
-            .padding(.horizontal, 4)
-            .padding(.vertical, 1)
-            .background(
-                RoundedRectangle(cornerRadius: 3, style: .continuous)
-                    .fill(Color(nsColor: kind.highlightColor))
-            )
-            .overlay(alignment: .bottom) {
-                if let underline = kind.underlineColor {
-                    Wave()
-                        .stroke(Color(nsColor: underline), lineWidth: 1.1)
-                        .frame(height: 3)
-                        .padding(.horizontal, 4)
-                        .offset(y: 1)
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                    Text("It includes a token only for \(client.title). Keep it to yourself.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .accessibilityLabel("\(kind.title) notes")
-    }
 
-    /// The editor's squiggle (`UnderlineOverlayView`) at sample size.
-    private struct Wave: Shape {
-        func path(in rect: CGRect) -> Path {
-            Path { path in
-                let step: CGFloat = 2
-                var x = rect.minX
-                var up = true
-                path.move(to: CGPoint(x: x, y: rect.midY))
-                while x < rect.maxX {
-                    let next = min(x + step, rect.maxX)
-                    path.addQuadCurve(to: CGPoint(x: next, y: rect.midY),
-                                      control: CGPoint(x: (x + next) / 2, y: up ? rect.minY : rect.maxY))
-                    x = next
-                    up.toggle()
+            VStack(alignment: .leading, spacing: 6) {
+                Text("2. Ask \(client.title) something about your writing:")
+                Text("“What's the entry open in Freewrite about? Link me to the strongest sentence.”")
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+
+            HStack(spacing: 8) {
+                if let seen = server.records[client]?.lastSeen {
+                    Label("Connected · last call \(seen.formatted(.relative(presentation: .named)))", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    ProgressView().controlSize(.small)
+                    Text("Waiting for \(client.title)…")
+                        .foregroundStyle(.secondary)
                 }
+                Spacer()
+                Button("Done", action: onDone)
+                    .keyboardShortcut(.defaultAction)
             }
         }
-    }
-}
-
-/// Which colour means what: every kind with its swatch, and how many notes of each are on the
-/// version when `notes` isn't empty. Used in the Review menu.
-struct AnnotationKindLegend: View {
-    var notes: [Annotation] = []
-
-    private var counts: [AnnotationKind: Int] {
-        notes.reduce(into: [:]) { $0[$1.resolvedKind, default: 0] += 1 }
+        .padding(20)
+        .frame(width: 520)
     }
 
-    var body: some View {
-        let counts = counts
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 3),
-                  alignment: .leading, spacing: 5) {
-            ForEach(AnnotationKind.allCases) { kind in
-                HStack(spacing: 5) {
-                    AnnotationKindSwatch(kind: kind, size: 8)
-                    Text(counts[kind].map { "\(kind.title) \($0)" } ?? kind.title)
-                        .font(.system(size: 11))
-                        .opacity(notes.isEmpty || counts[kind] != nil ? 0.8 : 0.4)
-                        .lineLimit(1)
-                }
-                .accessibilityElement(children: .combine)
-            }
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Highlight colours")
+    private static func shellQuoted(_ value: String) -> String {
+        guard value.contains(where: { " '\"$`\\!*?&;()<>|".contains($0) }) else { return value }
+        return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private static func json(_ object: [String: Any]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else { return "" }
+        return String(decoding: data, as: UTF8.self)
     }
 }

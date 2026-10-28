@@ -493,6 +493,7 @@ struct WritingEditor: NSViewRepresentable {
             if margin !== commentMargin {
                 commentMargin = margin
                 margin?.reveal = { [weak self] id in self?.reveal(id) }
+                margin?.revealRange = { [weak self] range in self?.reveal(range: range) }
                 scheduleCommentGeometry()
             }
             guard anchors != sourceCommentAnchors else { return }
@@ -559,6 +560,15 @@ struct WritingEditor: NSViewRepresentable {
             } else {
                 textView.scrollRangeToVisible(range)
             }
+            textView.setSelectedRange(NSRange(location: NSMaxRange(range), length: 0))
+            textView.showFindIndicator(for: range)
+            focus()
+        }
+
+        /// Scrolls any passage into view, flashes it and puts the caret after it (link targets).
+        private func reveal(range: NSRange) {
+            guard let textView, NSMaxRange(range) <= (textView.textStorage?.length ?? 0) else { return }
+            textView.scrollRangeToVisible(range)
             textView.setSelectedRange(NSRange(location: NSMaxRange(range), length: 0))
             textView.showFindIndicator(for: range)
             focus()

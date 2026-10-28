@@ -36,13 +36,16 @@ struct EntryVersion: Codable, Equatable, Identifiable, Sendable {
     var audio: String?
     /// Earlier voice notes recorded for the same version, oldest first (rare; omitted when empty).
     var previousAudio: [String]?
+    /// The version this one started from (its text was copied); nil = started blank.
+    var parent: String?
 
-    init(n: Int, createdAt: Date, source: Source = .typed, audio: String? = nil) {
+    init(n: Int, createdAt: Date, source: Source = .typed, audio: String? = nil, parent: String? = nil) {
         self.id = "v\(n)"
         self.n = n
         self.createdAt = createdAt
         self.source = source
         self.audio = audio
+        self.parent = parent
     }
 
     /// Every voice note of this version, oldest first.
@@ -67,6 +70,32 @@ struct EntryManifest: Codable, Equatable, Sendable {
     var hasVoiceNote: Bool { versions.contains { $0.audio != nil } }
 
     func version(_ id: String) -> EntryVersion? { versions.first(where: { $0.id == id }) }
+
+    /// The versions as a tree (a version under the one it started from; blank starts are roots),
+    /// depth-first, oldest first at each level.
+    var tree: [(version: EntryVersion, depth: Int)] {
+        let ids = Set(versions.map(\.id))
+        var children: [String: [EntryVersion]] = [:]
+        var roots: [EntryVersion] = []
+        for version in versions.sorted(by: { $0.n < $1.n }) {
+            if let parent = version.parent, ids.contains(parent), parent != version.id {
+                children[parent, default: []].append(version)
+            } else {
+                roots.append(version)
+            }
+        }
+        var result: [(EntryVersion, Int)] = []
+        var visited = Set<String>()
+        func visit(_ version: EntryVersion, _ depth: Int) {
+            guard visited.insert(version.id).inserted else { return }
+            result.append((version, depth))
+            for child in children[version.id] ?? [] { visit(child, depth + 1) }
+        }
+        roots.forEach { visit($0, 0) }
+        // Anything left over (a parent cycle in a hand-edited manifest) still shows, at the top level.
+        for version in versions where !visited.contains(version.id) { visit(version, 0) }
+        return result
+    }
 
     /// Shown once there is something to switch between or play back.
     var isInteresting: Bool { versions.count > 1 || hasVoiceNote }
@@ -278,7 +307,9 @@ struct EntryVersionStore: Sendable {
     /// top-level file. Each write is atomic and happens in that order, so an interruption can
     /// at worst leave the old text in the new version, never lose it.
     @discardableResult
-    func sealCurrent(entryFilename: String, now: Date = Date()) throws -> EntryManifest {
+    /// Seals the current version and starts the next one: blank, or with the text of `base`
+    /// (any version, including the one being sealed), which becomes its parent.
+    func sealCurrent(entryFilename: String, from base: String? = nil, now: Date = Date()) throws -> EntryManifest {
         let entryURL = entryFileURL(for: entryFilename)
         guard fileExists(entryURL, entryFilename: entryFilename) else { throw Failure.missingEntry(entryFilename) }
         let text = try readText(entryURL, entryFilename: entryFilename)
@@ -287,17 +318,21 @@ struct EntryVersionStore: Sendable {
         // A corrupt manifest throws here rather than being replaced.
         var manifest = try savedManifest(for: entryFilename) ?? .single(createdAt: createdAt(ofEntry: entryFilename))
         let sealedId = manifest.current
+        if let base, manifest.version(base) == nil { throw Failure.unknownVersion(base) }
 
         let sealedURL = sealedTextURL(for: sealedId, entryFilename: entryFilename)
         try FileManager.default.createDirectory(at: sealedURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try writeText(text, to: sealedURL, entryFilename: entryFilename)
 
-        let next = EntryVersion(n: (manifest.versions.map(\.n).max() ?? 0) + 1, createdAt: now)
+        let startText = try base.map { $0 == sealedId ? text : try self.text(of: $0, for: entryFilename) } ?? ""
+        let next = EntryVersion(n: (manifest.versions.map(\.n).max() ?? 0) + 1, createdAt: now, parent: base)
         manifest.versions.append(next)
         manifest.current = next.id
         try saveManifest(manifest, for: entryFilename)
 
-        try writeText("", to: entryURL, entryFilename: entryFilename)
+        try writeText(startText, to: entryURL, entryFilename: entryFilename)
+        appendLog(EntryEvent(at: now, actor: EntryEvent.user, op: .versionCreate, version: next.id, from: base, sealed: sealedId),
+                  for: entryFilename)
         return manifest
     }
 

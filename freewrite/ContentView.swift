@@ -177,8 +177,9 @@ struct ContentView: View {
     @State private var isHoveringDiscardVoiceNote = false
     // AI reviewers (Reviews.swift): notes on the selected entry, anchored to `annotationsBaseText`
     // for the current version.
-    @ObservedObject private var reviews = ReviewService.shared
-    @AppStorage(ReviewerStore.key) private var reviewersJSON = ""
+    @AppStorage(PromptStore.key) private var promptsJSON = ""
+    /// The prompt "Continue in ChatGPT / Claude" uses (the last one asked for).
+    @AppStorage("lastPromptId") private var lastPromptId = ""
     @State private var annotations: [Annotation] = []
     @State private var annotationsEntryId: UUID? = nil
     @State private var annotationsBaseText = ""
@@ -1080,8 +1081,8 @@ struct ContentView: View {
                 showStatus("This entry is now on \(displayedVersion?.id ?? "another version"). Open ⌘K again to review it.")
                 return
             }
-            if let profile = reviewerProfiles.first(where: { $0.id == reviewer.id }) {
-                startReview(profile)
+            if let prompt = prompts.first(where: { $0.id == reviewer.id }) {
+                askAgent(prompt)
             }
         case .clearReview:
             clearReview()
@@ -1098,7 +1099,7 @@ struct ContentView: View {
         guard let entry = selectedTextEntry, !isSelectedNoteClosed, let version = displayedVersion else { return .none }
         return PaletteReviewActions(
             versionId: version.id,
-            reviewers: runningReview == nil && !entry.isLocked ? reviewerProfiles.map { .init(id: $0.id, name: $0.name) } : [],
+            reviewers: !entry.isLocked ? prompts.map { .init(id: $0.id, name: $0.name) } : [],
             noteCount: annotations.filter { $0.versionId == version.id && $0.status != .dismissed }.count
         )
     }
@@ -1157,10 +1158,6 @@ struct ContentView: View {
             toggleComments()
         case .insertTemplate:
             insertTemplate()
-        case .newReviewerByChat:
-            // The chat opens as a sheet on Settings › Agents, where its reviewer gets selected on Save.
-            ReviewerChatLauncher.shared.open()
-            openReviewerSettings()
         }
     }
 
@@ -1655,7 +1652,8 @@ struct ContentView: View {
     }
 
     /// Seals the current text as vN and continues on an empty page as vN+1.
-    private func createNewVersion() {
+    /// Seals the current version and starts the next one: blank, or from `base`'s text.
+    private func createNewVersion(from base: String? = nil) {
         guard let entry = selectedTextEntry, !isSelectedNoteClosed, !voiceRecorder.isRecording else { return }
         showCurrentVersion()
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -1671,16 +1669,11 @@ struct ContentView: View {
         // Same for the notes on it: their positions must match the text being sealed.
         flushAnnotationAnchors()
         do {
-            let sealedId = entryManifest?.current ?? versionStore.manifest(for: entry.filename).current
-            let manifest = try versionStore.sealCurrent(entryFilename: entry.filename)
+            let manifest = try versionStore.sealCurrent(entryFilename: entry.filename, from: base)
             applyManifest(manifest, toEntry: entry.id)
             placeholderText = placeholderOptions.randomElement() ?? "Begin writing"
-            text = ""
+            text = base == nil ? "" : ((try? versionStore.text(of: manifest.current, for: entry.filename)) ?? "")
             updatePreviewText(for: entry)
-            let automatic = reviewerProfiles.filter(\.autoRunOnNewVersion)
-            if !automatic.isEmpty {
-                runReviews(automatic, on: entry, versionId: sealedId)
-            }
         } catch {
             showStatus("Couldn't start a new version: \(error.localizedDescription)")
         }
@@ -2374,6 +2367,18 @@ struct ContentView: View {
         }
         // A bar menu belongs to what was on screen when it opened.
         .onChange(of: selectedEntryId) { closeBarMenu() }
+        .onChange(of: agentFocusKey, initial: true) { updateAgentFocus() }
+        .onReceive(AgentLinks.shared.requests) { openLink($0) }
+        .onReceive(AgentFocus.shared.annotationsChanged) { filename in
+            guard filename == selectedTextEntry?.filename else { return }
+            reloadAnnotations()
+            // An agent's notes on the entry on screen open the margin (not in focus mode).
+            if !focusMode, !showingComments, !annotations.isEmpty { setCommentsShown(true) }
+        }
+        .onOpenURL { url in
+            if let link = FreewriteLink(url: url) { openLink(link) }
+        }
+        .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
         .onChange(of: currentVideoURL) { closeBarMenu() }
         .onChange(of: showingCommandPalette) { if showingCommandPalette { closeBarMenu() } }
         .onChange(of: voiceRecorder.isRecording) {
@@ -2396,8 +2401,7 @@ struct ContentView: View {
         }
         .onChange(of: storage.rootURL) {
             // The entries folder changed in Settings; show what's in the new one.
-            // Reviews stay tied to the folder they started in, so they stop here.
-            reviews.stopReviews(outside: storage.rootURL)
+            SettingsFile.shared.start(folder: storage.rootURL)
             flushAnnotationAnchors()
             currentVideoURL = nil
             closeLockedNote()
@@ -2469,11 +2473,6 @@ struct ContentView: View {
         }
         .onChange(of: commentVersionKey) {
             commentMargin.reset()
-        }
-        .onReceive(reviews.annotationsChanged) { filename in
-            if filename == selectedTextEntry?.filename {
-                reloadAnnotations()
-            }
         }
         .onReceive(timer) { _ in
             // A long voice note isn't "idle": keep locked notes open while it records.
@@ -2876,13 +2875,13 @@ struct ContentView: View {
     /// the displayed version's voice note (or its player) and transient status (transcribing,
     /// reviews, errors).
     private var textEntryStatusVisible: Bool {
-        viewedVersion != nil || !displayedAudioURLs.isEmpty || transcriptionStatus != nil || runningReview != nil
+        viewedVersion != nil || !displayedAudioURLs.isEmpty || transcriptionStatus != nil
     }
 
     @ViewBuilder
     private func textEntryStatus(textColor: Color, textHoverColor: Color) -> some View {
         let urls = displayedAudioURLs
-        let parts = [viewedVersion != nil, !urls.isEmpty, transcriptionStatus != nil || runningReview != nil]
+        let parts = [viewedVersion != nil, !urls.isEmpty, transcriptionStatus != nil]
         let separatorBefore = { (index: Int) in parts[..<index].contains(true) }
         if let viewedVersion {
             Text("Viewing \(viewedVersion.id) · read-only")
@@ -2911,7 +2910,7 @@ struct ContentView: View {
             }
             voiceNoteControls(urls, textColor: textColor, textHoverColor: textHoverColor)
         }
-        if let status = transcriptionStatus ?? runningReview.map({ "\($0.reviewerName) is reading \($0.versionId)…" }) {
+        if let status = transcriptionStatus {
             if separatorBefore(2) {
                 Text("•")
                     .foregroundColor(.gray)
@@ -3439,8 +3438,6 @@ struct ContentView: View {
         let documentsDirectory = getDocumentsDirectory()
         let plainURL = documentsDirectory.appendingPathComponent(entry.filename)
         let lockedURL = versionStore.lockedEntryFileURL(for: entry.filename)
-        // A review still running would write notes and a summary for an entry that's gone.
-        reviews.stopReviews(of: entry.filename, in: documentsDirectory)
 
         do {
             if entry.isLocked {
@@ -3715,47 +3712,101 @@ private struct LevelMeter: View {
     }
 }
 
+// MARK: - Agents
+
+extension ContentView {
+    /// Changes when the entry, version or lock state on screen changes.
+    private var agentFocusKey: String {
+        [selectedTextEntry?.filename ?? "", displayedVersion?.id ?? "", "\(selectedTextEntry?.isLocked ?? false)"]
+            .joined(separator: "|")
+    }
+
+    /// Tells connected agents what's on screen (their tools default to it).
+    private func updateAgentFocus() {
+        let focus = AgentFocus.shared
+        focus.entryFilename = selectedTextEntry?.filename
+        focus.versionId = displayedVersion?.id
+        focus.isLocked = selectedTextEntry?.isLocked ?? false
+    }
+
+    /// A clicked `freewrite://` or http link: the entry and version, then the note or passage.
+    private func openLink(_ link: FreewriteLink) {
+        guard let entry = entries.first(where: { $0.id == link.entryId }) else {
+            showStatus("That link points to an entry that isn't in this folder.")
+            return
+        }
+        selectEntry(id: entry.id, version: link.versionId)
+        guard link.noteId != nil || link.quote != nil else { return }
+        // The editor lays out the new text first.
+        Task {
+            try? await Task.sleep(for: .milliseconds(350))
+            revealLinkTarget(link)
+        }
+    }
+
+    private func revealLinkTarget(_ link: FreewriteLink) {
+        // Closed locked notes stay closed: a link never shows their text.
+        guard selectedEntryId == link.entryId, selectedTextEntry != nil, !isSelectedNoteClosed else { return }
+        if let noteId = link.noteId {
+            if !showingComments && !focusMode { setCommentsShown(true) }
+            commentMargin.activeId = noteId
+            Task {
+                try? await Task.sleep(for: .milliseconds(250))
+                commentMargin.reveal?(noteId)
+            }
+        } else if let quote = link.quote {
+            if let range = FreewriteLink.range(of: quote, prefix: link.prefix, suffix: link.suffix, in: displayedText) {
+                commentMargin.revealRange?(range)
+            } else {
+                showStatus("Couldn't find that passage in \(displayedVersion?.id ?? "this version").")
+            }
+        }
+    }
+}
+
 // MARK: - Reviews
 
 extension ContentView {
-    private var reviewerProfiles: [ReviewerProfile] { ReviewerStore.decode(reviewersJSON) }
+    private var prompts: [AgentPrompt] { PromptStore.decode(promptsJSON) }
 
     private var annotationStore: AnnotationStore { AnnotationStore(versionStore: versionStore) }
 
-    /// The review running on the selected entry, if any.
-    private var runningReview: ReviewActivity? {
-        selectedTextEntry.flatMap { reviews.activeRuns[$0.filename] }
-    }
 
     /// Changes when another entry, version or folder is on screen: annotations are reloaded then.
     private var annotationContext: String {
         [selectedTextEntry?.filename ?? "", entryManifest?.current ?? "", storage.rootURL.path].joined(separator: "|")
     }
 
+    /// Who wrote a note: the name it wrote as (if any), then the agent ("Mentor · Claude Code").
+    private func byline(_ note: Annotation) -> String {
+        let agent = reviewerName(note.reviewerId)
+        guard let author = note.author?.trimmingCharacters(in: .whitespacesAndNewlines), !author.isEmpty,
+              author.lowercased() != agent.lowercased() else { return agent }
+        return "\(author) · \(agent)"
+    }
+
     private func reviewerName(_ id: String) -> String {
-        reviewerProfiles.first(where: { $0.id == id })?.name ?? id.capitalized
+        AgentClient(rawValue: id)?.title ?? prompts.first(where: { $0.id == id })?.name ?? id.capitalized
     }
 
     /// Active notes of the version on screen, coloured per kind of note (stronger for the
     /// note whose card is hovered or active in the comment margin).
     private var editorHighlights: [EditorHighlight] {
         guard let version = displayedVersion, annotationsEntryId == selectedEntryId, !annotations.isEmpty else { return [] }
-        let profiles = Dictionary(reviewerProfiles.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let emphasized = showsCommentColumn ? commentMargin.emphasizedId : nil
         return annotations
             .filter { $0.versionId == version.id && $0.status == .active }
             .compactMap { annotation in
                 guard let anchor = annotation.anchor else { return nil }
-                let kind = annotation.resolvedKind
-                let reviewer = profiles[annotation.reviewerId]?.name ?? annotation.reviewerId.capitalized
+                let style = annotation.noteStyle
                 return EditorHighlight(
                     id: annotation.id,
                     range: anchor.range,
-                    color: annotation.id == emphasized ? kind.activeHighlightColor : kind.highlightColor,
+                    color: annotation.id == emphasized ? style.activeHighlightColor : style.highlightColor,
                     comment: annotation.comment,
-                    title: "\(kind.title) · \(reviewer)",
-                    titleColor: kind.nsColor,
-                    underlineColor: kind.underlineColor
+                    title: "\(style.label) · \(byline(annotation))",
+                    titleColor: style.color,
+                    underlineColor: style.underlineColor
                 )
             }
     }
@@ -3833,17 +3884,20 @@ extension ContentView {
     }
 
     private func dismissAnnotation(id: String) {
+        logUserStep(.noteDismiss, note: id)
         changeAnnotation(id: id, failure: "Couldn't dismiss the note") { $0.dismiss() }
     }
 
     /// Resolved by the writer (card button, context menu).
     private func resolveAnnotation(id: String) {
+        logUserStep(.noteResolve, note: id)
         changeAnnotation(id: id, failure: "Couldn't resolve the note") {
             $0.resolve(Annotation.Resolution(by: .user, at: Date()))
         }
     }
 
     private func reopenAnnotation(id: String) {
+        logUserStep(.noteReopen, note: id)
         changeAnnotation(id: id, failure: "Couldn't reopen the note") { $0.reopen() }
     }
 
@@ -3873,16 +3927,31 @@ extension ContentView {
             try annotationStore.update(for: entry.filename) { stored in
                 stored.removeAll { $0.versionId == version.id }
             }
+            let count = annotations.filter { $0.versionId == version.id }.count
             annotations.removeAll { $0.versionId == version.id }
+            versionStore.appendLog(EntryEvent(at: Date(), actor: EntryEvent.user, op: .notesClear, version: version.id,
+                                              detail: "\(count) note\(count == 1 ? "" : "s")"), for: entry.filename)
         } catch {
             showStatus("Couldn't clear the review: \(error.localizedDescription)")
         }
     }
 
+    /// Records one of your note actions in the entry's log.
+    private func logUserStep(_ op: EntryEvent.Op, note id: String) {
+        guard let entry = selectedTextEntry else { return }
+        let note = annotations.first { $0.id == id }
+        versionStore.appendLog(EntryEvent(at: Date(), actor: EntryEvent.user, op: op, version: note?.versionId, note: id),
+                               for: entry.filename)
+    }
+
     // MARK: Running
 
     private func openReviewerSettings() {
-        UserDefaults.standard.set("agents", forKey: "settingsPane")
+        openSettings(pane: "agents")
+    }
+
+    private func openSettings(pane: String) {
+        UserDefaults.standard.set(pane, forKey: "settingsPane")
         if let window = SettingsWindow.window {
             window.makeKeyAndOrderFront(nil)
         } else {
@@ -3898,63 +3967,55 @@ extension ContentView {
         withAnimation(.easeOut(duration: 0.2)) {
             bottomNavOpacity = 1.0
         }
-        if openBarMenu != .review {
-            Task { await reviews.refreshCredentials() }
-        }
         toggleBarMenu(.review)
     }
 
-    /// Reviews the version on screen with `profile`.
-    private func startReview(_ profile: ReviewerProfile) {
+    /// Ask an agent: copies a one-line request naming the prompt and the version on screen, to
+    /// paste into a connected agent (it reads the entry and the prompt through Freewrite's tools).
+    private func askAgent(_ prompt: AgentPrompt) {
         guard let entry = selectedTextEntry, let version = displayedVersion else { return }
-        if version.id == entryManifest?.current {
-            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                showStatus("Write something first, then ask for a review.")
-                return
-            }
-            // Reviewers read the file; make sure it's what's on screen.
-            guard saveEntry(entry: entry) else {
-                showStatus("Couldn't save this entry, so it wasn't reviewed.")
-                return
-            }
+        guard !entry.isLocked else {
+            showStatus("Locked notes stay on this Mac.")
+            return
         }
-        runReviews([profile], on: entry, versionId: version.id)
+        lastPromptId = prompt.id
+        let name = PromptStore.named(prompts).first { $0.prompt.id == prompt.id }?.name ?? PromptStore.slug(prompt.name)
+        let link = FreewriteLink(entryId: entry.id, versionId: version.id)
+        let request = "Use the Freewrite prompt \"\(name)\" on my entry \(link.webURL) (get it with Freewrite's get_prompt tool), and link me to the passages you talk about."
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(request, forType: .string)
+        showStatus(AgentServer.shared.hasClients
+            ? "Copied. Paste it into your agent."
+            : "Copied. Connect an agent in Settings › Agents first.")
     }
 
-    /// Runs reviewers one after another (one review per entry at a time).
-    private func runReviews(_ profiles: [ReviewerProfile], on entry: HumanEntry, versionId: String) {
-        Task {
-            for profile in profiles {
-                do {
-                    let outcome = try await reviews.review(entryFilename: entry.filename, entryId: entry.id, versionId: versionId, profile: profile)
-                    showStatus(Self.outcomeMessage(outcome), for: entry.id)
-                    // New notes open the margin (not in focus mode, and only for the entry on screen).
-                    if outcome.added > 0, selectedEntryId == entry.id, !focusMode, !showingComments {
-                        setCommentsShown(true)
-                    }
-                } catch ReviewError.stopped(let reason) {
-                    // The rest of the queue would run on an entry that's gone or in another folder.
-                    if reason == .folderChanged {
-                        showStatus("\(profile.name): \(ReviewError.stopped(reason).localizedDescription)")
-                    }
-                    return
-                } catch {
-                    showStatus("\(profile.name): \(error.localizedDescription)", for: entry.id)
-                }
-            }
+    /// Opens ChatGPT or Claude on the web with the prompt and the text on screen. Too long for a
+    /// link: the prompt is copied and the site opens empty, ready to paste.
+    private func continueInChat(_ prompt: AgentPrompt, site: ChatSite) {
+        guard let entry = selectedTextEntry, !entry.isLocked else {
+            showStatus("Locked notes stay on this Mac.")
+            return
+        }
+        let body = displayedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else {
+            showStatus("Write something first, then open a chat.")
+            return
+        }
+        let full = ExternalChat.prompt(prompt, text: body)
+        if let url = ExternalChat.url(for: site, prompt: full), url.absoluteString.count <= ExternalChat.maxURLLength {
+            NSWorkspace.shared.open(url)
+        } else {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(full, forType: .string)
+            NSWorkspace.shared.open(site.home)
+            showStatus("This entry is too long for a link: the prompt is copied, paste it in \(site.title).")
         }
     }
 
-    private static func outcomeMessage(_ outcome: ReviewOutcome) -> String {
-        let name = outcome.reviewerName
-        let notes = outcome.added == 1 ? "1 note" : "\(outcome.added) notes"
-        let resolved = outcome.resolved == 1 ? "1 earlier note" : "\(outcome.resolved) earlier notes"
-        switch (outcome.added, outcome.resolved) {
-        case (0, 0): return "\(name) had nothing to add."
-        case (_, 0): return "\(name) left \(notes) on \(outcome.versionId)."
-        case (0, _): return "\(name) resolved \(resolved)."
-        default: return "\(name) left \(notes) on \(outcome.versionId) and resolved \(resolved)."
-        }
+    /// The start of a long reply, for the Review menu (the full reply is in the comments).
+    private static func excerpt(_ reply: String, limit: Int = 280) -> String {
+        guard reply.count > limit else { return reply }
+        return String(reply.prefix(limit)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
     }
 
     // MARK: Comment margin
@@ -4006,7 +4067,7 @@ extension ContentView {
         var cards: [CommentCardItem] = []
         if let summary = reviewSummaries[version.id] {
             cards.append(CommentCardItem(
-                id: "summary-\(version.id)", title: "Summary · \(summary.reviewerName)", color: .secondaryLabelColor,
+                id: "summary-\(version.id)", title: "Reply · \(summary.reviewerName)", color: .secondaryLabelColor,
                 comment: summary.summary, style: .summary, isAnchored: false))
         }
         let notes = annotations.filter { $0.versionId == version.id }
@@ -4023,7 +4084,7 @@ extension ContentView {
         // (above the first line) instead of vanishing, so it can still be read and reopened.
         let textLength = (displayedText as NSString).length
         for note in ordered {
-            let kind = note.resolvedKind
+            let style = note.noteStyle
             var detail: String?
             if note.status == .resolved, let resolution = note.resolution {
                 let who = resolution.by == .user ? "you" : reviewerName(resolution.reviewerId ?? note.reviewerId)
@@ -4031,8 +4092,8 @@ extension ContentView {
             }
             cards.append(CommentCardItem(
                 id: note.id,
-                title: "\(note.isPageNote ? "Page · " : "")\(kind.title) · \(reviewerName(note.reviewerId))",
-                color: kind.nsColor,
+                title: "\(note.isPageNote ? "Page · " : "")\(style.label) · \(byline(note))",
+                color: style.color,
                 comment: note.comment,
                 detail: detail,
                 style: note.status == .resolved ? .resolved : .open,
@@ -4063,9 +4124,7 @@ extension ContentView {
             reduceMotion: reduceMotion,
             resolvedCount: resolvedCount,
             showsResolved: showsResolvedComments,
-            emptyMessage: runningReview != nil
-                ? "\(runningReview?.reviewerName ?? "A reviewer") is reading \(version)…"
-                : "No comments on \(version).\nAsk a reviewer with Review with… (✦).",
+            emptyMessage: "No comments on \(version).\nAsk an agent with ✦.",
             footerHeight: navHeight,
             onSelect: { id in
                 commentMargin.activeId = id
@@ -4088,67 +4147,65 @@ extension ContentView {
 
     private func reviewButton(textColor: Color, textHoverColor: Color) -> some View {
         Button(action: openReviewMenu) {
-            Group {
-                if runningReview != nil {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(isHoveringReview ? textHoverColor : textColor)
-                } else {
-                    Image(systemName: "sparkles")
-                        .foregroundColor(isHoveringReview || openBarMenu == .review ? textHoverColor : textColor)
-                }
-            }
-            .frame(width: 14, height: 14)
+            Image(systemName: "sparkles")
+                .foregroundColor(isHoveringReview || openBarMenu == .review ? textHoverColor : textColor)
+                .frame(width: 14, height: 14)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(runningReview == nil ? "Review with" : "Review running")
+        .accessibilityLabel("Ask an agent")
         .accessibilityIdentifier("reviewButton")
-        .help("Review with…")
+        .help("Ask an agent…")
         .modifier(barHover($isHoveringReview))
         .barMenuAnchor(.item(.review))
     }
 
-    /// Review with…: reviewers, the latest summary for the version, Clear Review, settings.
+    /// Ask an agent: a prompt per row (copies a request for a connected agent), the latest reply
+    /// for the version, Continue in ChatGPT / Claude, the notes, settings.
     private var reviewMenuContent: BarMenuContent {
         let version = displayedVersion
         let versionNotes = annotations.filter { $0.versionId == version?.id && $0.status != .dismissed }
         let summary = selectedTextEntry.flatMap { entry in
             version.flatMap { annotationStore.latestSummary(versionId: $0.id, entryFilename: entry.filename) }
         }
-        let configured = reviews.credentialStates.values.contains(where: \.isConfigured)
-        var footer: String?
-        if let runningReview {
-            footer = "\(runningReview.reviewerName) is reading \(runningReview.versionId)…"
-        } else if !configured && !reviews.credentialStates.isEmpty {
-            footer = "Add a Claude key or sign in to ChatGPT first."
-        }
+        let prompts = prompts
         var sections = [
             BarMenuSection(
-                id: "reviewers",
-                header: "Review \(version?.id ?? "v1") with",
-                note: "Sends this entry's text to the reviewer's provider.",
-                actions: reviewerProfiles.map { profile in
-                    BarMenuAction(
-                        id: "reviewWith-\(profile.id)",
-                        title: profile.name,
-                        dot: Color(nsColor: profile.color.nsColor),
-                        isEnabled: runningReview == nil
-                    ) { startReview(profile) }
-                },
-                footer: footer
+                id: "prompts",
+                header: "Ask an agent about \(version?.id ?? "v1")",
+                note: AgentServer.shared.hasClients
+                    ? "Copies a request to paste into your agent."
+                    : "Copies a request for an agent. Connect one in Settings › Agents.",
+                actions: prompts.map { prompt in
+                    BarMenuAction(id: "askAgent-\(prompt.id)", title: prompt.name, trailingSymbol: "doc.on.doc") {
+                        askAgent(prompt)
+                    }
+                }
             ),
         ]
         if let summary {
-            sections.append(BarMenuSection(id: "summary", paragraph: summary))
+            sections.append(BarMenuSection(id: "summary", paragraph: Self.excerpt(summary)))
         }
-        sections.append(BarMenuSection(id: "legend", accessory: AnyView(
-            AnnotationKindLegend(notes: versionNotes.filter { $0.status == .active })
-        )))
+        // A longer conversation on the web, with the last prompt asked for.
+        if let prompt = prompts.first(where: { $0.id == lastPromptId }) ?? prompts.first {
+            sections.append(BarMenuSection(
+                id: "external",
+                header: "Continue in a chat with \(prompt.name)",
+                actions: ChatSite.allCases.map { site in
+                    BarMenuAction(id: "continueIn-\(site.rawValue)", title: site.title, trailingSymbol: "arrow.up.forward") {
+                        continueInChat(prompt, site: site)
+                    }
+                }
+            ))
+        }
+        let activeNotes = versionNotes.filter { $0.status == .active }
+        if !activeNotes.isEmpty {
+            sections.append(BarMenuSection(id: "legend", accessory: AnyView(AnnotationKindLegend(notes: activeNotes))))
+        }
         if !versionNotes.isEmpty {
             sections.append(BarMenuSection(id: "clear", actions: [
                 BarMenuAction(
                     id: "clearReviewButton",
-                    title: "Clear Review (\(versionNotes.count == 1 ? "1 note" : "\(versionNotes.count) notes"))"
+                    title: "Clear Notes (\(versionNotes.count == 1 ? "1 note" : "\(versionNotes.count) notes"))"
                 ) { clearReview() },
             ]))
         }
@@ -4159,8 +4216,11 @@ extension ContentView {
                 title: showingComments ? "Hide Comments" : (openCount > 0 ? "Show Comments (\(openCount))" : "Show Comments"),
                 detail: ShortcutStore.shortcut(for: .toggleComments, in: shortcutsJSON)?.displayString
             ) { toggleComments() },
-            BarMenuAction(id: "reviewersAndModelsButton", title: "Reviewers & Models…") {
-                openReviewerSettings()
+            BarMenuAction(id: "promptsButton", title: "Prompts…") {
+                openSettings(pane: "prompts")
+            },
+            BarMenuAction(id: "reviewersAndModelsButton", title: "Agents…") {
+                openSettings(pane: "agents")
             },
         ]))
         return BarMenuContent(width: 270, sections: sections)
@@ -4175,22 +4235,29 @@ extension ContentView {
         switch kind {
         case .versions:
             guard let manifest = entryManifest else { return nil }
-            let versions = manifest.versions.reversed().map { version in
-                BarMenuAction(
+            // A tree: each version under the one it started from (blank starts at the left).
+            let versions = manifest.tree.map { item in
+                let version = item.version
+                let indent = String(repeating: "    ", count: max(item.depth - 1, 0)) + (item.depth > 0 ? "└ " : "")
+                return BarMenuAction(
                     id: "versionRow-\(version.id)",
-                    title: version.id,
+                    title: indent + version.id,
                     detail: versionDetail(version, in: manifest),
                     isChecked: version.id == displayedVersion?.id
                 ) { showVersion(version.id) }
             }
-            return BarMenuContent(width: 270, sections: [
+            let base = displayedVersion?.id ?? manifest.current
+            return BarMenuContent(width: 280, sections: [
                 BarMenuSection(id: "versions", actions: versions),
                 BarMenuSection(id: "new", actions: [
                     BarMenuAction(
                         id: "newVersionButton",
-                        title: "New Version",
+                        title: "New Blank Version",
                         detail: ShortcutStore.shortcut(for: .newVersion, in: shortcutsJSON)?.displayString
                     ) { createNewVersion() },
+                    BarMenuAction(id: "newVersionFromButton", title: "New Version from \(base)") {
+                        createNewVersion(from: base)
+                    },
                 ]),
             ])
         case .font:
@@ -4388,7 +4455,7 @@ extension ContentView {
         }
         let title = switch item {
         case .timer: timerIsRunning ? "Pause Timer" : "Start Timer"
-        case .review: "Review with…"
+        case .review: "Ask an Agent…"
         case .backspace: backspaceDisabled ? "Turn Backspace On" : "Turn Backspace Off"
         case .fullscreen: isFullscreen ? "Exit Fullscreen" : "Fullscreen"
         case .history: showingSidebar ? "Hide History" : "Show History"

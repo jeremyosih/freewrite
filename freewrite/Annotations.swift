@@ -75,10 +75,18 @@ struct Annotation: Codable, Equatable, Identifiable, Sendable {
     /// Where the note sits in the text; nil for a page note about the version as a whole.
     var anchor: AnnotationAnchor?
     var comment: String
+    /// The note's label, any short word the agent picks ("insight", "tension", "typo", …).
     var kind: String
     var status: Status
     let createdAt: Date
     var resolution: Resolution? = nil
+    /// The agent's choice of colour: "#RRGGBB" or a name (red, orange, yellow, green, mint, teal,
+    /// blue, indigo, purple, pink, brown, gray). nil = the label's colour.
+    var color: String? = nil
+    /// "highlight" (a tint) or "squiggle" (a wavy underline). nil = the label's usual style.
+    var style: String? = nil
+    /// Who the agent wrote as (e.g. the prompt, "Mentor"); `reviewerId` is the agent itself.
+    var author: String? = nil
 
     /// `kind` as one of the fixed kinds (older files may hold other words).
     var resolvedKind: AnnotationKind { AnnotationKind.resolve(kind) }
@@ -132,6 +140,9 @@ extension Annotation {
         status = try container.decodeIfPresent(Status.self, forKey: .status) ?? .active
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(timeIntervalSince1970: 0)
         resolution = try? container.decodeIfPresent(Resolution.self, forKey: .resolution)
+        color = try? container.decodeIfPresent(String.self, forKey: .color)
+        style = try? container.decodeIfPresent(String.self, forKey: .style)
+        author = try? container.decodeIfPresent(String.self, forKey: .author)
     }
 }
 

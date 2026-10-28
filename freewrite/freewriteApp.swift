@@ -7,7 +7,15 @@
 
 import SwiftUI
 
+/// `freewrite mcp …` runs the agent relay (AgentRelay.swift) instead of the app.
 @main
+enum FreewriteMain {
+    @MainActor static func main() {
+        if AgentRelay.isRequested { AgentRelay.run() }
+        freewriteApp.main()
+    }
+}
+
 struct freewriteApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @AppStorage(SettingsKey.colorScheme) private var colorSchemeString: String = "light"
@@ -45,6 +53,10 @@ struct freewriteApp: App {
 // Add AppDelegate to handle window configuration
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Agents connect only once you've connected one in Settings › Agents.
+        AgentServer.shared.update()
+        // settings.json in the entries folder: read it (it wins) or create it.
+        SettingsFile.shared.start(folder: EntryStorage.shared.rootURL)
         if let window = NSApplication.shared.windows.first {
             // Ensure window starts in windowed mode
             if window.styleMask.contains(.fullScreen) {

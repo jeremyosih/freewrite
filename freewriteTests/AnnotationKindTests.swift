@@ -45,32 +45,6 @@ struct AnnotationKindTests {
         #expect(AnnotationKind.normalized([]) == AnnotationKind.allCases)
     }
 
-    @Test func builtInReviewersHaveTheirKinds() {
-        let byId = Dictionary(uniqueKeysWithValues: ReviewerProfile.defaults.map { ($0.id, $0) })
-        #expect(byId["editor"]?.kinds == [.grammar, .clarity, .structure])
-        #expect(byId["mirror"]?.kinds == [.insight, .question])
-        #expect(byId["coach"]?.kinds == [.question, .praise])
-        for profile in ReviewerProfile.defaults {
-            #expect(profile.kinds.contains(profile.effectiveDefaultKind))
-        }
-    }
-
-    @Test func profilesSavedBeforeKindsGetDefaults() throws {
-        let json = """
-        [{"id":"editor","name":"Editor","instructions":"x","model":"","color":"blue","scope":"latest","autoRunOnNewVersion":false},
-         {"id":"custom","name":"Mine","instructions":"y","model":"","color":"green","scope":"latest","autoRunOnNewVersion":false,
-          "kinds":["praise","unknown-kind","grammar"],"defaultKind":"praise"}]
-        """
-        let profiles = try JSONDecoder().decode([ReviewerProfile].self, from: Data(json.utf8))
-        #expect(profiles[0].kinds == [.grammar, .clarity, .structure])
-        #expect(profiles[0].effectiveDefaultKind == .clarity)
-        #expect(profiles[1].kinds == [.grammar, .praise])
-        #expect(profiles[1].effectiveDefaultKind == .praise)
-
-        let roundTrip = try JSONDecoder().decode([ReviewerProfile].self, from: JSONEncoder().encode(profiles))
-        #expect(roundTrip == profiles)
-    }
-
     private func makeToolbox(text: String, kinds: [AnnotationKind]?, defaultKind: AnnotationKind?) throws -> ReviewToolbox {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("freewrite-kinds-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -112,6 +86,37 @@ struct AnnotationKindTests {
         #expect(toolbox.defaultKind == .insight)
         _ = try toolbox.addAnnotation(.init(quote: "Nice", comment: "Yes.", kind: "praise"), id: "P")
         #expect(try toolbox.annotations.load(for: entry).first?.kind == "praise")
+    }
+
+    @Test func agentsPickTheirOwnLabelColourAndStyle() throws {
+        let toolbox = try makeToolbox(text: "Their going home. It was fine.", kinds: nil, defaultKind: nil)
+        let added = try toolbox.addAnnotation(.init(quote: "Their", comment: "There.", kind: "typo", color: "#ff0000", style: "squiggle", author: "Editor"), id: "T1")
+        #expect(!added.contains("Note:"))
+        let odd = try toolbox.addAnnotation(.init(quote: "It was fine", comment: "Vague.", color: "sparkly", style: "neon"), id: "T2")
+        #expect(odd.contains("isn't a colour") && odd.contains("isn't a style"))
+        let saved = Dictionary(uniqueKeysWithValues: try toolbox.annotations.load(for: entry).map { ($0.id, $0) })
+        #expect(saved["T1"]?.kind == "typo" && saved["T1"]?.color == "#ff0000" && saved["T1"]?.style == "squiggle" && saved["T1"]?.author == "Editor")
+        #expect(saved["T2"]?.kind == "note" && saved["T2"]?.color == nil && saved["T2"]?.style == nil)
+        _ = try toolbox.updateAnnotation(id: "T2", comment: nil, kind: "tension", color: "teal", style: "highlight")
+        let updated = try toolbox.annotations.load(for: entry).first { $0.id == "T2" }
+        #expect(updated?.kind == "tension" && updated?.color == "teal" && updated?.style == "highlight")
+        let log = toolbox.versionStore.log(for: entry)
+        #expect(log.map(\.op) == [.noteAdd, .noteAdd, .noteUpdate])
+        #expect(log.first?.author == "Editor" && log.first?.note == "T1" && log.first?.version == "v1")
+        #expect(log.first?.summary.contains("note.add T1 on v1: typo \"Their\"") == true)
+    }
+
+    @Test func noteStyleFollowsTheAgentsChoices() throws {
+        func note(_ kind: String, color: String? = nil, style: String? = nil) -> Annotation {
+            Annotation(id: "x", entryId: "", versionId: "v1", reviewerId: "claude-code", runId: "", anchor: nil,
+                       comment: "", kind: kind, status: .active, createdAt: Date(), color: color, style: style)
+        }
+        #expect(NoteStyle(note("grammar")).isSquiggle)
+        #expect(!NoteStyle(note("grammar", style: "highlight")).isSquiggle)
+        #expect(NoteStyle(note("tension")).label == "Tension")
+        #expect(NoteStyle(note("tension")).color == NoteStyle(note("Tension")).color)
+        #expect(NoteStyle(note("x", color: "red")).color == .systemRed)
+        #expect(NoteStyle.parse("#0f0") != nil && NoteStyle.parse("#00ff00") != nil && NoteStyle.parse("nope") == nil)
     }
 
     @Test func briefListsTheReviewersKinds() throws {

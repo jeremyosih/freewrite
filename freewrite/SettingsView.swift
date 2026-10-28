@@ -42,7 +42,6 @@ enum AppCommand: String, CaseIterable, Identifiable {
     case useDefaultFont
     case showWelcomeEntry
     case insertTemplate
-    case newReviewerByChat
     case toggleFocusMode
     case toggleComments
 
@@ -57,7 +56,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .toggleTimer: return "Start/Pause Timer"
         case .recordVideo: return "Record Video"
         case .recordVoiceNote: return "Record Voice Note"
-        case .reviewEntry: return "Review with…"
+        case .reviewEntry: return "Ask an Agent…"
         case .toggleNoteLock: return "Lock/Unlock Note"
         case .toggleBackspace: return "Toggle Backspace"
         case .toggleTheme: return "Toggle Light/Dark"
@@ -68,7 +67,6 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .useDefaultFont: return "Use Default Font & Size"
         case .showWelcomeEntry: return "Show Welcome Entry"
         case .insertTemplate: return "Insert Template…"
-        case .newReviewerByChat: return "New Reviewer by Chat…"
         case .toggleFocusMode: return "Focus Mode"
         case .toggleComments: return "Show/Hide Comments"
         }
@@ -89,7 +87,7 @@ enum AppCommand: String, CaseIterable, Identifiable {
         case .toggleTheme: return KeyShortcut(key: "l", modifiers: [.command, .shift])
         case .increaseFontSize: return KeyShortcut(key: "=", modifiers: [.command])
         case .decreaseFontSize: return KeyShortcut(key: "-", modifiers: [.command])
-        case .showWelcomeEntry, .insertTemplate, .chooseFont, .randomFont, .useDefaultFont, .newReviewerByChat: return nil
+        case .showWelcomeEntry, .insertTemplate, .chooseFont, .randomFont, .useDefaultFont: return nil
         case .toggleFocusMode: return KeyShortcut(key: "f", modifiers: [.command, .shift])
         case .toggleComments: return KeyShortcut(key: "m", modifiers: [.command, .shift])
         }
@@ -277,7 +275,6 @@ struct FreewriteCommands: Commands {
             button(for: .recordVoiceNote)
             Divider()
             button(for: .reviewEntry)
-            button(for: .newReviewerByChat)
             button(for: .toggleNoteLock)
         }
         CommandGroup(after: .sidebar) {
@@ -322,6 +319,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case permissions
     case privacy
     case agents
+    case prompts
     case templates
     case bottomBar
     case shortcuts
@@ -360,6 +358,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .permissions: return "Permissions"
         case .bottomBar: return "Bottom Bar"
         case .agents: return "Agents"
+        case .prompts: return "Prompts"
         case .templates: return "Templates"
         case .privacy: return "Privacy"
         case .shortcuts: return "Shortcuts"
@@ -375,7 +374,8 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .storage: return "internaldrive"
         case .permissions: return "hand.raised"
         case .bottomBar: return "dock.rectangle"
-        case .agents: return "sparkles"
+        case .agents: return "point.3.connected.trianglepath.dotted"
+        case .prompts: return "text.bubble"
         case .templates: return "doc.text"
         case .privacy: return "lock"
         case .shortcuts: return "command"
@@ -386,6 +386,11 @@ enum SettingsPane: String, CaseIterable, Identifiable {
 
 /// "Version 1.2 (34)" from the bundle.
 enum AppVersion {
+    /// "1.2".
+    static var short: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+    }
+
     static var display: String {
         let info = Bundle.main.infoDictionary
         let short = info?["CFBundleShortVersionString"] as? String ?? "?"
@@ -462,6 +467,7 @@ struct SettingsView: View {
         case .permissions: PermissionsSettingsView()
         case .bottomBar: BottomBarSettingsView()
         case .agents: AgentsSettingsView()
+        case .prompts: PromptsSettingsView()
         case .templates: TemplatesSettingsView()
         case .privacy: PrivacySettingsView()
         case .shortcuts: ShortcutSettingsView()
