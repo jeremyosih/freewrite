@@ -19,6 +19,7 @@ enum SettingsKey {
     static let shortcuts = "shortcuts"
     static let storageBookmark = "storageFolderBookmark"
     static let showComments = "showComments"
+    static let showHighlights = "showHighlights"
 }
 
 // MARK: - Shortcuts

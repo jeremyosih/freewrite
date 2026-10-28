@@ -520,9 +520,15 @@ struct WritingEditor: NSViewRepresentable {
             guard let margin = commentMargin, let textView, let layoutManager = textView.textLayoutManager else { return }
             let origin = textView.textContainerOrigin
             var segments: [String: CGRect] = [:]
+            // Lay out everything from the top to the lowest passage. TextKit 2 otherwise estimates
+            // the height of text above a range it lays out, and the estimate ignores the extra line
+            // spacing, so cards drifted further above their passages the lower they were.
+            if let lowest = commentAnchors.values.map(NSMaxRange).max(),
+               let end = textRange(for: NSRange(location: 0, length: lowest)) {
+                layoutManager.ensureLayout(for: end)
+            }
             for (id, range) in commentAnchors {
                 guard let textRange = textRange(for: range) else { continue }
-                layoutManager.ensureLayout(for: textRange)
                 var first: CGRect?
                 layoutManager.enumerateTextSegments(in: textRange, type: .highlight, options: []) { _, frame, _, _ in
                     first = frame
@@ -651,6 +657,9 @@ struct WritingEditor: NSViewRepresentable {
         @objc private func scrolled() {
             closePopover()
             publishScrollOffset()
+            // TextKit can still settle line heights as text scrolls into view; re-measure the
+            // passages (coalesced to once per run loop pass, cheap once laid out).
+            scheduleCommentGeometry()
             // The menu follows its line.
             if templateMenu?.isOpen == true {
                 refreshTemplateMenu()
@@ -683,6 +692,11 @@ struct EditorTheme: Equatable {
 // MARK: - Text view
 
 final class WritingTextView: NSTextView {
+    /// Scroll on the main thread. With responsive scrolling AppKit moves the text before the scroll
+    /// offset reaches the comment margin, so cards and their connector lines trailed the text by a
+    /// frame or more while scrolling fast.
+    override class var isCompatibleWithResponsiveScrolling: Bool { false }
+
     var onHover: ((NSPoint?) -> Void)?
     /// A mouse click that ended without dragging, at this point (text view coordinates).
     var onClick: ((NSPoint) -> Void)?

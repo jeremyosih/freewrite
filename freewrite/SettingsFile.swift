@@ -35,6 +35,7 @@ enum SettingsSchema {
         Key(name: SettingsKey.sessionMinutes, kind: .integer, help: "Timer length in minutes."),
         Key(name: SettingsKey.wordCountUnit, kind: .string(allowed: ["words", "characters"]), help: "What the bottom bar counts."),
         Key(name: SettingsKey.showComments, kind: .bool, help: "Comment margin open."),
+        Key(name: SettingsKey.showHighlights, kind: .bool, help: "Notes' highlights shown in the text."),
         Key(name: SettingsKey.bottomBarLayout, kind: .json(check: anyJSON), help: "Bottom bar items, their side (left/right/hidden) and order."),
         Key(name: SettingsKey.shortcuts, kind: .json(check: anyJSON), help: "Keyboard shortcut overrides by command (null = unassigned)."),
         Key(name: SettingsKey.templates, kind: .json(check: decodes([WritingTemplate].self)), help: "Writing templates (the \"/\" menu). Keep the fields of the existing ones."),

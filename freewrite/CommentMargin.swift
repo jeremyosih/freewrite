@@ -112,6 +112,11 @@ struct CommentCardItem: Identifiable, Equatable {
     let color: NSColor
     let comment: String
     var detail: String? = nil
+    /// Who wrote it ("Friend · Claude Code"), under the comment.
+    var byline: String? = nil
+    /// Whether the passage's highlight is hidden; nil when there's nothing to toggle (page notes,
+    /// resolved notes, the reply).
+    var highlightHidden: Bool? = nil
     let style: Style
     /// Tied to a passage (else a page note or the summary, shown above the first line).
     let isAnchored: Bool
@@ -133,11 +138,16 @@ struct CommentColumn: View {
     var onResolve: (String) -> Void
     var onReopen: (String) -> Void
     var onDismiss: (String) -> Void
+    var onToggleHighlight: (String) -> Void
     var onToggleResolved: () -> Void
     var onClose: () -> Void
+    /// Highlights in the text on or off (every note at once).
+    var showsHighlights = true
+    var onToggleHighlights: () -> Void = {}
 
     @State private var isHoveringResolved = false
     @State private var isHoveringClose = false
+    @State private var isHoveringHighlights = false
 
     private var textColor: Color { .gray }
     private var hoverColor: Color { isDark ? .white : .black }
@@ -173,6 +183,7 @@ struct CommentColumn: View {
                     onResolve: { onResolve(card.id) },
                     onReopen: { onReopen(card.id) },
                     onDismiss: { onDismiss(card.id) },
+                    onToggleHighlight: { onToggleHighlight(card.id) },
                     onHover: { hovering in
                         if hovering {
                             model.hoveredId = card.id
@@ -249,6 +260,15 @@ struct CommentColumn: View {
                 .accessibilityIdentifier("toggleResolvedComments")
             }
             Spacer(minLength: 0)
+            Button(action: onToggleHighlights) {
+                Image(systemName: showsHighlights ? "eye" : "eye.slash")
+                    .foregroundColor(isHoveringHighlights ? hoverColor : textColor)
+            }
+            .buttonStyle(.plain)
+            .onHover { isHoveringHighlights = $0 }
+            .help(showsHighlights ? "Hide Highlights" : "Show Highlights")
+            .accessibilityLabel(showsHighlights ? "Hide highlights in the text" : "Show highlights in the text")
+            .accessibilityIdentifier("toggleHighlightsButton")
             Button(action: onClose) {
                 Image(systemName: "sidebar.left")
                     .foregroundColor(isHoveringClose ? hoverColor : textColor)
@@ -281,6 +301,7 @@ struct CommentCardView: View {
     var onResolve: () -> Void
     var onReopen: () -> Void
     var onDismiss: () -> Void
+    var onToggleHighlight: () -> Void = {}
     var onHover: (Bool) -> Void
 
     private var kindColor: Color { Color(nsColor: card.color) }
@@ -338,6 +359,13 @@ struct CommentCardView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if let byline = card.byline {
+                Text(byline)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -368,6 +396,11 @@ struct CommentCardView: View {
 
     @ViewBuilder
     private var actions: some View {
+        if let hidden = card.highlightHidden {
+            iconButton(hidden ? "eye.slash" : "eye", help: hidden ? "Show Highlight" : "Hide Highlight", action: onToggleHighlight)
+                .opacity(hidden ? 1 : 0.75)
+                .accessibilityIdentifier("toggleHighlight-\(card.id)")
+        }
         switch card.style {
         case .open:
             iconButton("checkmark", help: "Resolve", action: onResolve)
@@ -395,6 +428,9 @@ struct CommentCardView: View {
         switch card.style {
         case .open:
             Button("Resolve", action: onResolve)
+            if let hidden = card.highlightHidden {
+                Button(hidden ? "Show Highlight" : "Hide Highlight", action: onToggleHighlight)
+            }
             Button("Dismiss Note", action: onDismiss)
         case .resolved:
             Button("Reopen", action: onReopen)

@@ -87,6 +87,8 @@ struct Annotation: Codable, Equatable, Identifiable, Sendable {
     var style: String? = nil
     /// Who the agent wrote as (e.g. the prompt, "Mentor"); `reviewerId` is the agent itself.
     var author: String? = nil
+    /// The writer hid this note's highlight in the text (the note itself stays open).
+    var hideHighlight: Bool? = nil
 
     /// `kind` as one of the fixed kinds (older files may hold other words).
     var resolvedKind: AnnotationKind { AnnotationKind.resolve(kind) }
@@ -143,6 +145,7 @@ extension Annotation {
         color = try? container.decodeIfPresent(String.self, forKey: .color)
         style = try? container.decodeIfPresent(String.self, forKey: .style)
         author = try? container.decodeIfPresent(String.self, forKey: .author)
+        hideHighlight = try? container.decodeIfPresent(Bool.self, forKey: .hideHighlight)
     }
 }
 

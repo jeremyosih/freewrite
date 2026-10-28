@@ -191,6 +191,7 @@ struct ContentView: View {
     /// The comment margin (CommentMargin.swift) on the left of the text: shown, with resolved
     /// notes, its geometry, and whether it was open when focus mode started.
     @AppStorage(SettingsKey.showComments) private var showingComments = false
+    @AppStorage(SettingsKey.showHighlights) private var showHighlights = true
     @State private var showsResolvedComments = false
     @State private var commentMargin = CommentMarginModel()
     @State private var commentsBeforeFocus = false
@@ -3794,8 +3795,9 @@ extension ContentView {
     private var editorHighlights: [EditorHighlight] {
         guard let version = displayedVersion, annotationsEntryId == selectedEntryId, !annotations.isEmpty else { return [] }
         let emphasized = showsCommentColumn ? commentMargin.emphasizedId : nil
+        guard showHighlights else { return [] }
         return annotations
-            .filter { $0.versionId == version.id && $0.status == .active }
+            .filter { $0.versionId == version.id && $0.status == .active && !($0.hideHighlight ?? false) }
             .compactMap { annotation in
                 guard let anchor = annotation.anchor else { return nil }
                 let style = annotation.noteStyle
@@ -3893,6 +3895,14 @@ extension ContentView {
         logUserStep(.noteResolve, note: id)
         changeAnnotation(id: id, failure: "Couldn't resolve the note") {
             $0.resolve(Annotation.Resolution(by: .user, at: Date()))
+        }
+    }
+
+    /// Hides or shows one note's highlight in the text; the note stays open in the margin.
+    private func toggleHighlight(id: String) {
+        changeAnnotation(id: id, failure: "Couldn't change the highlight") {
+            $0.hideHighlight = ($0.hideHighlight ?? false) ? nil : true
+            return true
         }
     }
 
@@ -4067,8 +4077,8 @@ extension ContentView {
         var cards: [CommentCardItem] = []
         if let summary = reviewSummaries[version.id] {
             cards.append(CommentCardItem(
-                id: "summary-\(version.id)", title: "Reply · \(summary.reviewerName)", color: .secondaryLabelColor,
-                comment: summary.summary, style: .summary, isAnchored: false))
+                id: "summary-\(version.id)", title: "Reply", color: .secondaryLabelColor,
+                comment: summary.summary, byline: summary.reviewerName, style: .summary, isAnchored: false))
         }
         let notes = annotations.filter { $0.versionId == version.id }
         let shown = notes.filter { note in
@@ -4092,10 +4102,12 @@ extension ContentView {
             }
             cards.append(CommentCardItem(
                 id: note.id,
-                title: "\(note.isPageNote ? "Page · " : "")\(style.label) · \(byline(note))",
+                title: note.isPageNote ? "\(style.label) · Page" : style.label,
                 color: style.color,
                 comment: note.comment,
                 detail: detail,
+                byline: byline(note),
+                highlightHidden: note.status == .active && !note.isPageNote ? (note.hideHighlight ?? false) : nil,
                 style: note.status == .resolved ? .resolved : .open,
                 isAnchored: !note.isPageNote && (note.anchor.map { NSMaxRange($0.range) <= textLength } ?? false)))
         }
@@ -4133,8 +4145,11 @@ extension ContentView {
             onResolve: resolveAnnotation(id:),
             onReopen: reopenAnnotation(id:),
             onDismiss: dismissAnnotation(id:),
+            onToggleHighlight: toggleHighlight(id:),
             onToggleResolved: { showsResolvedComments.toggle() },
-            onClose: { setCommentsShown(false) }
+            onClose: { setCommentsShown(false) },
+            showsHighlights: showHighlights,
+            onToggleHighlights: { showHighlights.toggle() }
         )
         .opacity(commentChromeOpacity)
         .onHover { isHoveringComments = $0 }
