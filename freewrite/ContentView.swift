@@ -4165,7 +4165,7 @@ extension ContentView {
     }
 
     /// Ask an agent: a prompt per row (copies a request for a connected agent), the latest reply
-    /// for the version, settings.
+    /// for the version, the connected agents and when they last called.
     private var reviewMenuContent: BarMenuContent {
         let version = displayedVersion
         let summary = selectedTextEntry.flatMap { entry in
@@ -4176,9 +4176,7 @@ extension ContentView {
             BarMenuSection(
                 id: "prompts",
                 header: "Ask an agent about \(version?.id ?? "v1")",
-                note: AgentServer.shared.hasClients
-                    ? "Copies a request to paste into your agent."
-                    : "Copies a request for an agent. Connect one in Settings › Agents.",
+                note: "Copies a request to paste into your agent.",
                 actions: prompts.map { prompt in
                     BarMenuAction(id: "askAgent-\(prompt.id)", title: prompt.name, trailingSymbol: "doc.on.doc") {
                         askAgent(prompt)
@@ -4189,15 +4187,9 @@ extension ContentView {
         if let summary {
             sections.append(BarMenuSection(id: "summary", paragraph: Self.excerpt(summary)))
         }
-        // Comments (show/hide, clear, highlights) live in the comment margin, not here.
-        sections.append(BarMenuSection(id: "settings", actions: [
-            BarMenuAction(id: "promptsButton", title: "Prompts…") {
-                openSettings(pane: "prompts")
-            },
-            BarMenuAction(id: "reviewersAndModelsButton", title: "Agents…") {
-                openSettings(pane: "agents")
-            },
-        ]))
+        // Who can pick a request up, and when each last called. Prompts and agents are edited in
+        // Settings; comments (show/hide, clear, highlights) live in the comment margin.
+        sections.append(BarMenuSection(id: "agents", header: "Agents", accessory: AnyView(ConnectedAgentsList())))
         return BarMenuContent(width: 270, sections: sections)
     }
 }

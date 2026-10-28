@@ -34,6 +34,47 @@ struct AgentClientLogo: View {
     }
 }
 
+/// The connected agents and when each last called Freewrite (the ✦ menu). Times refresh while open.
+struct ConnectedAgentsList: View {
+    private let server = AgentServer.shared
+
+    var body: some View {
+        let clients = AgentClient.allCases.filter { server.records[$0] != nil }
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            VStack(alignment: .leading, spacing: 7) {
+                if clients.isEmpty {
+                    Text("No agents connected. Connect one in Settings › Agents.")
+                        .font(.system(size: 12))
+                        .opacity(0.55)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(clients) { client in
+                    HStack(spacing: 8) {
+                        AgentClientLogo(client: client, size: 14)
+                            .opacity(0.85)
+                        Text(client.title)
+                            .font(.system(size: 12.5))
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
+                        Text(lastCall(client, now: context.date))
+                            .font(.system(size: 11.5))
+                            .monospacedDigit()
+                            .opacity(0.5)
+                            .lineLimit(1)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            }
+        }
+    }
+
+    private func lastCall(_ client: AgentClient, now: Date) -> String {
+        guard let seen = server.records[client]?.lastSeen else { return "no calls yet" }
+        if now.timeIntervalSince(seen) < 60 { return "just now" }
+        return seen.formatted(.relative(presentation: .named, unitsStyle: .abbreviated))
+    }
+}
+
 struct AgentsSettingsView: View {
     private let server = AgentServer.shared
     @State private var connecting: AgentClient?
