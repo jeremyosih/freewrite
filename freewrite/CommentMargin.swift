@@ -145,6 +145,9 @@ struct CommentColumn: View {
     /// Highlights in the text on or off (every note at once).
     var showsHighlights = true
     var onToggleHighlights: () -> Void = {}
+    /// "Clear Notes on v2 (3)" in the footer's ⋯ menu; nil hides it.
+    var clearTitle: String? = nil
+    var onClearNotes: () -> Void = {}
 
     @State private var isHoveringResolved = false
     @State private var isHoveringClose = false
@@ -261,6 +264,20 @@ struct CommentColumn: View {
                 .accessibilityIdentifier("toggleResolvedComments")
             }
             Spacer(minLength: 0)
+            if let clearTitle {
+                Menu {
+                    Button(clearTitle, role: .destructive, action: onClearNotes)
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .foregroundColor(textColor)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("More")
+                .accessibilityLabel("More comment actions")
+                .accessibilityIdentifier("commentMarginMore")
+            }
             Button(action: onToggleHighlights) {
                 Image(systemName: showsHighlights ? "eye" : "eye.slash")
                     .foregroundColor(isHoveringHighlights ? hoverColor : textColor)

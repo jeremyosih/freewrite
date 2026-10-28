@@ -1991,7 +1991,12 @@ struct ContentView: View {
                             if showsCommentColumn { commentMargin.hoveredId = id }
                         },
                         onClickHighlight: { id in
-                            if showsCommentColumn { commentMargin.activeId = id }
+                            // A highlight is the way back to a closed margin: open it at this note.
+                            if !showsCommentColumn {
+                                guard !focusMode else { return }
+                                setCommentsShown(true)
+                            }
+                            commentMargin.activeId = id
                         }
                     )
                     .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { commentMargin.editorFrame = $0 }
@@ -3930,6 +3935,13 @@ extension ContentView {
         }
     }
 
+    /// "Clear Notes on v2 (3)", or nil when the version has none.
+    private var clearNotesTitle: String? {
+        guard let version = displayedVersion else { return nil }
+        let count = annotations.filter { $0.versionId == version.id && $0.status != .dismissed }.count
+        return count == 0 ? nil : "Clear Notes on \(version.id) (\(count))"
+    }
+
     /// Removes every note on the version on screen.
     private func clearReview() {
         guard let entry = selectedTextEntry, let version = displayedVersion else { return }
@@ -4151,7 +4163,9 @@ extension ContentView {
             onToggleResolved: { showsResolvedComments.toggle() },
             onClose: { setCommentsShown(false) },
             showsHighlights: showHighlights,
-            onToggleHighlights: { showHighlights.toggle() }
+            onToggleHighlights: { showHighlights.toggle() },
+            clearTitle: clearNotesTitle,
+            onClearNotes: clearReview
         )
         .opacity(commentChromeOpacity)
         .onHover { isHoveringComments = $0 }
@@ -4180,7 +4194,6 @@ extension ContentView {
     /// for the version, Continue in ChatGPT / Claude, the notes, settings.
     private var reviewMenuContent: BarMenuContent {
         let version = displayedVersion
-        let versionNotes = annotations.filter { $0.versionId == version?.id && $0.status != .dismissed }
         let summary = selectedTextEntry.flatMap { entry in
             version.flatMap { annotationStore.latestSummary(versionId: $0.id, entryFilename: entry.filename) }
         }
@@ -4214,25 +4227,8 @@ extension ContentView {
                 }
             ))
         }
-        let activeNotes = versionNotes.filter { $0.status == .active }
-        if !activeNotes.isEmpty {
-            sections.append(BarMenuSection(id: "legend", accessory: AnyView(AnnotationKindLegend(notes: activeNotes))))
-        }
-        if !versionNotes.isEmpty {
-            sections.append(BarMenuSection(id: "clear", actions: [
-                BarMenuAction(
-                    id: "clearReviewButton",
-                    title: "Clear Notes (\(versionNotes.count == 1 ? "1 note" : "\(versionNotes.count) notes"))"
-                ) { clearReview() },
-            ]))
-        }
-        let openCount = versionNotes.filter { $0.status == .active }.count
+        // Comments (show/hide, clear, highlights) live in the comment margin, not here.
         sections.append(BarMenuSection(id: "settings", actions: [
-            BarMenuAction(
-                id: "toggleCommentsButton",
-                title: showingComments ? "Hide Comments" : (openCount > 0 ? "Show Comments (\(openCount))" : "Show Comments"),
-                detail: ShortcutStore.shortcut(for: .toggleComments, in: shortcutsJSON)?.displayString
-            ) { toggleComments() },
             BarMenuAction(id: "promptsButton", title: "Prompts…") {
                 openSettings(pane: "prompts")
             },
